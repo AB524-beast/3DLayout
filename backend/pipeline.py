@@ -119,11 +119,16 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     
     # --- 7. FALLBACK ---
     if not rooms:
-        rooms = create_fallback_room(all_walls)
+        rooms = create_fallback_room(wall_mask, width, height, pixels_per_meter)
     
     # Add all walls to each room for proper 3D rendering
     for room in rooms:
         room["all_walls"] = all_walls  # Global walls for 3D scene
+        # Ensure every room (rectangular or fallback) carries an explicit,
+        # ordered outline so the frontend never has to infer winding order
+        # from the walls array.
+        if "outline" not in room:
+            room["outline"] = build_outline_from_walls(room["walls"])
     
     result = {
         "rooms": rooms,
@@ -273,6 +278,12 @@ def find_rectangular_rooms(horiz_walls, vert_walls):
                             "centerX": float((x_left + x_right) / 2),
                             "centerY": float((y_top + y_bottom) / 2),
                             "walls": room_walls,
+                            "outline": [
+                                {"x": float(x_left), "y": float(y_top)},
+                                {"x": float(x_right), "y": float(y_top)},
+                                {"x": float(x_right), "y": float(y_bottom)},
+                                {"x": float(x_left), "y": float(y_bottom)},
+                            ],
                             "area": float(width_m * height_m)
                         })
     
@@ -418,28 +429,86 @@ def match_labels_to_rooms(rooms, labels):
     return rooms
 
 
-def create_fallback_room(walls):
-    """Create a fallback room from all walls."""
-    if not walls:
-        return [{
-            "label": "Main Living Space",
-            "dimensions": "6.0m x 4.5m",
-            "centerX": 0.0,
-            "centerY": 0.0,
-            "walls": [
-                {"x1": -6.0, "y1": -4.5, "x2": 6.0, "y2": -4.5},
-                {"x1": 6.0, "y1": -4.5, "x2": 6.0, "y2": 4.5},
-                {"x1": 6.0, "y1": 4.5, "x2": -6.0, "y2": 4.5},
-                {"x1": -6.0, "y1": 4.5, "x2": -6.0, "y2": -4.5}
-            ],
-            "all_walls": []
-        }]
-    
+def build_outline_from_walls(walls):
+    """
+    Best-effort ordered outline for rooms whose `walls` list is already a
+    closed loop (e.g. the 4-wall rectangles from find_rectangular_rooms).
+    Just takes each wall's start point in order.
+    """
+    return [{"x": float(w["x1"]), "y": float(w["y1"])} for w in walls]
+
+
+def create_fallback_room(wall_mask, width, height, pixels_per_meter):
+    """
+    Build a fallback room from the outer contour of the wall mask, instead
+    of dumping unordered/disconnected Hough-line segments. This guarantees
+    a closed, properly-wound polygon so the 3D frontend can extrude/fill
+    it correctly, even for non-rectangular floor plans (bay windows,
+    angled walls, etc.) that find_rectangular_rooms() can't handle.
+    """
+    default_box = [{
+        "label": "Main Living Space",
+        "dimensions": "6.0m x 4.5m",
+        "centerX": 0.0,
+        "centerY": 0.0,
+        "walls": [
+            {"x1": -6.0, "y1": -4.5, "x2": 6.0, "y2": -4.5},
+            {"x1": 6.0, "y1": -4.5, "x2": 6.0, "y2": 4.5},
+            {"x1": 6.0, "y1": 4.5, "x2": -6.0, "y2": 4.5},
+            {"x1": -6.0, "y1": 4.5, "x2": -6.0, "y2": -4.5}
+        ],
+        "outline": [
+            {"x": -6.0, "y": -4.5}, {"x": 6.0, "y": -4.5},
+            {"x": 6.0, "y": 4.5}, {"x": -6.0, "y": 4.5}
+        ],
+        "all_walls": []
+    }]
+
+    if wall_mask is None:
+        return default_box
+
+    # Close small gaps in the wall lines so the outer boundary forms one
+    # connected shape before we trace its contour.
+    kernel = np.ones((7, 7), np.uint8)
+    closed = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return default_box
+
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 100:  # too small to be a real floor plan
+        return default_box
+
+    epsilon = 0.01 * cv2.arcLength(largest, True)
+    approx = cv2.approxPolyDP(largest, epsilon, True).reshape(-1, 2)
+
+    if len(approx) < 3:
+        return default_box
+
+    # Convert pixel coords -> meter-space, keeping the contour's natural
+    # winding order intact so the points describe a real closed loop.
+    outline = [
+        {"x": float(px - width / 2) / pixels_per_meter,
+         "y": float(py - height / 2) / pixels_per_meter}
+        for px, py in approx
+    ]
+
+    walls = []
+    for i in range(len(outline)):
+        p1 = outline[i]
+        p2 = outline[(i + 1) % len(outline)]
+        walls.append({"x1": p1["x"], "y1": p1["y"], "x2": p2["x"], "y2": p2["y"]})
+
+    xs = [p["x"] for p in outline]
+    ys = [p["y"] for p in outline]
+
     return [{
         "label": "Detected Space",
         "dimensions": "Full Blueprint",
-        "centerX": 0.0,
-        "centerY": 0.0,
-        "walls": walls[:20],
+        "centerX": float(sum(xs) / len(xs)),
+        "centerY": float(sum(ys) / len(ys)),
+        "walls": walls,
+        "outline": outline,
         "all_walls": walls
     }]

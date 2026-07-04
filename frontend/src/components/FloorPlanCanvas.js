@@ -106,7 +106,6 @@ export default function FloorPlanCanvas({ layoutData, activeRoom }) {
 
         const roomGroup = new THREE.Group();
         roomGroup.name = `room-${roomIndex}`;
-        const allPoints = [];
 
         // Build walls
         room.walls.forEach((wall, wallIndex) => {
@@ -123,8 +122,6 @@ export default function FloorPlanCanvas({ layoutData, activeRoom }) {
 
           const midPoint = new THREE.Vector2().addVectors(start, end).multiplyScalar(0.5);
           const angle = Math.atan2(end.y - start.y, end.x - start.x);
-
-          allPoints.push(new THREE.Vector2(wall.x1, wall.y1));
 
           // Wall mesh
           const wallGeometry = new THREE.BoxGeometry(distance, WALL_HEIGHT, WALL_THICKNESS);
@@ -151,10 +148,20 @@ export default function FloorPlanCanvas({ layoutData, activeRoom }) {
           roomGroup.add(capMesh);
         });
 
-        // Generate floor
-        if (allPoints.length >= 3) {
+        // Generate floor from the explicit, pre-ordered outline the backend
+        // provides (room.outline). This does NOT depend on the order of
+        // room.walls, so it stays correct even for the non-rectangular
+        // fallback shape (bay windows, angled walls, disconnected wall
+        // segments, etc.) where wall order carries no geometric meaning.
+        const outlinePoints = Array.isArray(room.outline)
+          ? room.outline
+              .filter(p => p && typeof p.x === 'number' && typeof p.y === 'number')
+              .map(p => new THREE.Vector2(p.x, p.y))
+          : [];
+
+        if (outlinePoints.length >= 3) {
           try {
-            const shape = new THREE.Shape(allPoints);
+            const shape = new THREE.Shape(outlinePoints);
             const floorGeometry = new THREE.ShapeGeometry(shape);
             const floorMaterial = new THREE.MeshStandardMaterial({ 
               color: 0x1e293b,
