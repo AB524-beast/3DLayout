@@ -9,89 +9,105 @@ export default function Home() {
   const [layoutData, setLayoutData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [activeRoom, setActiveRoom] = useState(null);
 
-  // Handle local blueprint asset targeting [cite: 5]
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      if (!file.type.startsWith('image/')) {
+        setError('Please upload an image file (PNG, JPG, JPEG).');
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError('Image too large. Maximum size is 10MB.');
+        return;
+      }
       setSelectedFile(file);
       setPreviewUrl(URL.createObjectURL(file));
       setError(null);
+      setNotice(null);
+      setLayoutData(null);
+      setActiveRoom(null);
     }
   };
 
-  // Safe API transmission over HTTPS architecture targeting the FastAPI backend [cite: 6]
   const handleUploadAndProcess = async () => {
     if (!selectedFile) {
-      setError('Please choose or snapshot a floor plan blueprint image first.');
+      setError('Please choose a floor plan blueprint image first.');
       return;
     }
 
     setIsLoading(true);
     setError(null);
+    setNotice(null);
+    setActiveRoom(null);
 
     const formData = new FormData();
     formData.append('file', selectedFile);
 
     try {
-      // Connects directly to your Python Uvicorn backend pipeline instance [cite: 6, 28]
-      const response = await fetch('http://127.0.0.1:8000/api/v1/process-layout', {
+      const response = await fetch(`${API_URL}/api/v1/process-layout`, {
         method: 'POST',
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error(`Backend processing failure: Status ${response.status}`);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Backend error: ${response.status}`);
       }
 
-      // Intercept the parsed data interchange block (JSON schema) [cite: 8, 9]
       const data = await response.json();
+      
+      if (data.error) {
+        setNotice(data.error);
+      }
+      
       setLayoutData(data);
     } catch (err) {
-      console.error(err);
-      setError(err.message || 'An error occurred while connecting to the computer vision backend.');
+      console.error('Upload error:', err);
       
-      // FALLBACK SEED MOCK DATA: For demonstration if backend is not yet spun up
-      setLayoutData({
-        rooms: [
-          { label: "Living Room", dimensions: "5.2m x 4.0m", centerX: 0, centerY: 0, walls: [
-            { x1: -5, y1: -4, x2: 5, y2: -4 }, { x1: 5, y1: -4, x2: 5, y2: 4 },
-            { x1: 5, y1: 4, x2: -5, y2: 4 }, { x1: -5, y1: 4, x2: -5, y2: -4 }
-          ]},
-          { label: "Kitchen", dimensions: "3.5m x 3.0m", centerX: 8, centerY: 1, walls: [
-            { x1: 5, y1: -2, x2: 11, y2: -2 }, { x1: 11, y1: -2, x2: 11, y2: 4 },
-            { x1: 11, y1: 4, x2: 5, y2: 4 }
-          ]}
-        ]
-      });
+      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+        setError('Cannot connect to backend server. Please ensure the backend is running on ' + API_URL);
+      } else {
+        setError(err.message || 'An error occurred while processing the blueprint.');
+      }
+      
+      setLayoutData(null);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const handleRoomClick = (roomIndex) => {
+    setActiveRoom(activeRoom === roomIndex ? null : roomIndex);
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      {/* Structural Header Grid Navigation */}
       <nav className="border-b border-slate-800 bg-slate-900/50 backdrop-blur sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
           <div className="flex items-center space-x-3">
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/30">3D</div>
             <span className="text-xl font-black tracking-tight bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">FloorPlan3D Engine</span>
           </div>
-          <span className="text-xs bg-slate-800 text-slate-400 px-3 py-1 rounded-full border border-slate-700">v1.0.0 (MIT Stack) [cite: 33]</span>
+          <span className="text-xs bg-slate-800 text-slate-400 px-3 py-1 rounded-full border border-slate-700">v1.0.1</span>
         </div>
       </nav>
 
       <div className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
         
-        {/* Left Hand Web Management UI Client Operations Console */}
+        {/* Left Panel - Upload & Room List */}
         <section className="space-y-6">
+          {/* Upload Card */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
             <h2 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
               <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 text-xs flex items-center justify-center font-mono">1</span>
-              Capture Blueprint Source [cite: 5]
+              Capture Blueprint Source
             </h2>
-            <p className="text-xs text-slate-400 mb-4">Upload blueprint snapshots with a reference asset (e.g. card) to scale calibrations[cite: 5].</p>
+            <p className="text-xs text-slate-400 mb-4">Upload blueprint snapshots to generate 3D room layouts.</p>
 
             <div className="mt-2 flex justify-center px-6 pt-5 pb-6 border-2 border-slate-800 border-dashed rounded-lg hover:border-slate-700 transition relative bg-slate-950/40">
               <div className="space-y-1 text-center">
@@ -99,20 +115,20 @@ export default function Home() {
                   <path d="M28 8H12a4 4 0 00-4 4v20a4 4 0 004 4h16a4 4 0 004-4V12a4 4 0 00-4-4z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                   <path d="M14 26l7-7 21 21M26 18l3-3 8 8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                <div className="flex text-sm text-slate-400">
+                <div className="flex text-sm text-slate-400 justify-center">
                   <label className="relative cursor-pointer bg-slate-900 rounded-md font-medium text-indigo-400 hover:text-indigo-300 focus-within:outline-none px-2 py-0.5 border border-slate-700">
                     <span>Upload Image file</span>
                     <input type="file" accept="image/*" className="sr-only" onChange={handleFileChange} />
                   </label>
                 </div>
-                <p className="text-xs text-slate-500">PNG, JPG, SVG high-res structural documents [cite: 5, 11]</p>
+                <p className="text-xs text-slate-500">PNG, JPG, JPEG supported</p>
               </div>
             </div>
 
             {previewUrl && (
               <div className="mt-4 rounded-lg overflow-hidden border border-slate-800 bg-slate-950 p-2">
-                <p className="text-xs font-semibold text-slate-400 mb-2">Source Blueprint Blueprint Target Preview:</p>
-                <img src={previewUrl} alt="Blueprint source preview" className="w-full max-h-48 object-contain rounded" />
+                <p className="text-xs font-semibold text-slate-400 mb-2">Source Blueprint Preview:</p>
+                <img src={previewUrl} alt="Blueprint preview" className="w-full max-h-48 object-contain rounded" />
               </div>
             )}
 
@@ -122,42 +138,84 @@ export default function Home() {
               </div>
             )}
 
+            {notice && (
+              <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-lg text-xs font-medium">
+                ℹ️ {notice} Showing default room layout.
+              </div>
+            )}
+
             <button
               onClick={handleUploadAndProcess}
-              disabled={isLoading}
+              disabled={isLoading || !selectedFile}
               className={`mt-5 w-full flex items-center justify-center py-3 px-4 rounded-lg text-sm font-bold shadow-lg transition-all ${
-                isLoading 
+                isLoading || !selectedFile
                   ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
-                  : 'bg-indigo-600 hover:bg-indigo-50 hover:shadow-indigo-500/20 text-white hover:text-indigo-950'
+                  : 'bg-indigo-600 hover:bg-indigo-500 hover:shadow-indigo-500/20 text-white'
               }`}
             >
               {isLoading ? (
                 <div className="flex items-center space-x-2">
                   <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-                  <span>Processing CV Pipeline... [cite: 7, 10]</span>
+                  <span>Processing CV Pipeline...</span>
                 </div>
               ) : (
                 'Generate 3D Environment Model'
               )}
             </button>
           </div>
+
+          {/* Room List / Interactive Buttons */}
+          {layoutData && layoutData.rooms && layoutData.rooms.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
+              <h2 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
+                <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-xs flex items-center justify-center font-mono">2</span>
+                Detected Rooms ({layoutData.totalRooms || layoutData.rooms.length})
+              </h2>
+              <p className="text-xs text-slate-400 mb-4">Click a room to highlight it in the 3D view.</p>
+              
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {layoutData.rooms.map((room, index) => (
+                  <button
+                    key={index}
+                    onClick={() => handleRoomClick(index)}
+                    className={`w-full text-left p-3 rounded-lg border transition-all duration-200 ${
+                      activeRoom === index
+                        ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-lg shadow-indigo-500/10'
+                        : 'bg-slate-800/50 border-slate-700 text-slate-300 hover:bg-slate-800 hover:border-slate-600'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${activeRoom === index ? 'bg-indigo-400 animate-pulse' : 'bg-slate-500'}`} />
+                        <span className="font-semibold text-sm">{room.label || `Room ${index + 1}`}</span>
+                      </div>
+                      <span className="text-xs text-slate-400 font-mono">{room.dimensions}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500 pl-4">
+                      Center: ({room.centerX?.toFixed(1)}m, {room.centerY?.toFixed(1)}m) • {room.walls?.length || 0} walls
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
-        {/* Right Hand Geometric Visual Viewing Canvas Display Engine */}
+        {/* Right Panel - 3D Canvas */}
         <section className="lg:col-span-2 space-y-4">
           <div className="flex justify-between items-center">
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-400 text-xs flex items-center justify-center font-mono">2</span>
-              Interactive Real-Time 3D WebGL Mesh Canvas [cite: 18]
+              <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-400 text-xs flex items-center justify-center font-mono">3</span>
+              Interactive Real-Time 3D WebGL Mesh Canvas
             </h2>
             {layoutData && (
               <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
-                ● Geometry Realized [cite: 8]
+                ● Geometry Realized
               </span>
             )}
           </div>
           
-          <FloorPlanCanvas layoutData={layoutData} />
+          <FloorPlanCanvas layoutData={layoutData} activeRoom={activeRoom} />
         </section>
 
       </div>
