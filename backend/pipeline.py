@@ -2,11 +2,10 @@ import cv2
 import numpy as np
 import math
 
-# Optional Tesseract import for text extraction
+# Optional Tesseract import
 try:
     import pytesseract
     TESSERACT_AVAILABLE = True
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 except ImportError:
     TESSERACT_AVAILABLE = False
     print("WARNING: pytesseract not installed. OCR room labeling disabled.")
@@ -29,9 +28,27 @@ def to_native(obj):
     return obj
 
 
+def snap_to_ortho(p1, p2, threshold_deg=5.0):
+    """Straightens slightly skewed drawing/scanning variations into clean 90-degree lines."""
+    x1, y1 = p1
+    x2, y2 = p2
+    dx = x2 - x1
+    dy = y2 - y1
+    angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+    
+    if angle <= threshold_deg:
+        mean_y = (y1 + y2) / 2.0
+        return (x1, mean_y), (x2, mean_y)
+    elif angle >= (90.0 - threshold_deg):
+        mean_x = (x1 + x2) / 2.0
+        return (mean_x, y1), (mean_x, y2)
+    return p1, p2
+
+
 def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     """
-    Advanced Floorplan Parsing Pipeline with Expanded 3D Scene Scaling.
+    Transforms any 2D blueprint image map into a structured 3D coordinate model.
+    Uses ensemble thresholding and robust contour topological segmentation.
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -39,138 +56,155 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
         raise ValueError("Invalid image format. Could not decode image.")
 
     height, width = img_bgr.shape[:2]
-    
-    # 🔥 FIX 1: Broaden scale multiplier (lowering this value scales UP the 3D walls dramatically)
-    pixels_per_meter = max(width, height) / 42.0
+    img_area = width * height
 
-    # --- 1. WALL ISOLATION & CLEANING ---
+    # --- 1. ENSEMBLE PREPROCESSING (Fixes low contrast and multi-weight lines) ---
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    thresh = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 15, 7
-    )
-
-    kernel_clean = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    wall_mask = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_clean)
-
-    # --- 2. ROOM SPACE SEGMENTATION ---
-    room_spaces = cv2.bitwise_not(wall_mask)
+    # Dual-path thresholding captures faint lines alongside solid structural bounds
+    thresh_fine = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 5)
+    thresh_coarse = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 9)
+    wall_mask = cv2.bitwise_or(thresh_fine, thresh_coarse)
     
-    # Smooth away stray layout debris, text lines, and door swings
-    kernel_room = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    kernel_clean = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, kernel_clean)
+
+    # Invert to map room space islands directly
+    room_spaces = cv2.bitwise_not(wall_mask)
+    kernel_room = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     room_spaces = cv2.morphologyEx(room_spaces, cv2.MORPH_OPEN, kernel_room)
 
+    # --- 2. UNIVERSAL TOPOLOGY ROOM SEGMENTATION ---
     contours, _ = cv2.findContours(room_spaces, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
     rooms = []
     all_walls = []
-    img_area = width * height
+    
+    # Track outer boundaries for relative scaling calibration
+    min_x_px, max_x_px = float('inf'), float('-inf')
+    min_y_px, max_y_px = float('inf'), float('-inf')
+    
+    raw_room_data = []
 
     if contours:
-        for idx, cnt in enumerate(contours):
+        for cnt in contours:
             area = cv2.contourArea(cnt)
-            
-            # Skip noise and the root background contour frame
-            if area < (img_area * 0.008) or area > (img_area * 0.95):
+            if area < (img_area * 0.003) or area > (img_area * 0.92):
                 continue
 
-            epsilon = 0.015 * cv2.arcLength(cnt, True)
+            epsilon = 0.01 * cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, epsilon, True)
             
             if len(approx) >= 4:
-                room_walls = []
-                outline_points = []
+                room_pixel_walls = []
+                outline_pixel_pts = []
                 
                 for i in range(len(approx)):
-                    p1 = approx[i][0]
-                    p2 = approx[(i + 1) % len(approx)][0]
+                    p1_raw = approx[i][0]
+                    p2_raw = approx[(i + 1) % len(approx)][0]
+                    p1_s, p2_s = snap_to_ortho(p1_raw, p2_raw)
                     
-                    w_data = {
-                        "x1": float(p1[0] - width / 2) / pixels_per_meter,
-                        "y1": float(p1[1] - height / 2) / pixels_per_meter,
-                        "x2": float(p2[0] - width / 2) / pixels_per_meter,
-                        "y2": float(p2[1] - height / 2) / pixels_per_meter
-                    }
-                    room_walls.append(w_data)
-                    all_walls.append(w_data)
-                    outline_points.append({"x": w_data["x1"], "y": w_data["y1"]})
+                    w_data = {"x1": float(p1_s[0]), "y1": float(p1_s[1]), "x2": float(p2_s[0]), "y2": float(p2_s[1])}
+                    room_pixel_walls.append(w_data)
+                    outline_pixel_pts.append({"x": w_data["x1"], "y": w_data["y1"]})
+                    
+                    min_x_px = min(min_x_px, w_data["x1"], w_data["x2"])
+                    max_x_px = max(max_x_px, w_data["x1"], w_data["x2"])
+                    min_y_px = min(min_y_px, w_data["y1"], w_data["y2"])
+                    max_y_px = max(max_y_px, w_data["y1"], w_data["y2"])
 
-                xs = [p["x"] for p in outline_points]
-                ys = [p["y"] for p in outline_points]
-                w_m = max(xs) - min(xs)
-                h_m = max(ys) - min(ys)
+                raw_room_data.append({"walls": room_pixel_walls, "outline": outline_pixel_pts, "area_px": area})
 
-                rooms.append({
-                    "label": f"Room {len(rooms) + 1}",
-                    "dimensions": f"{w_m:.1f}m x {h_m:.1f}m",
-                    "centerX": float(sum(xs) / len(xs)),
-                    "centerY": float(sum(ys) / len(ys)),
-                    "walls": room_walls,
-                    "outline": outline_points,
-                    "area": float(area)
-                })
+    # --- 3. DYNAMIC METRIC VIEWPORT CALIBRATION ---
+    bbox_w = max_x_px - min_x_px if max_x_px > min_x_px else width
+    bbox_h = max_y_px - min_y_px if max_y_px > min_y_px else height
+    pixels_per_meter = max(bbox_w, bbox_h) / 24.0
 
-    # --- 3. CHARACTER RECOGNITION (OCR) & CLEAN LABELING ---
+    for idx, r_data in enumerate(raw_room_data):
+        metric_walls = []
+        metric_outline = []
+        
+        for w in r_data["walls"]:
+            w_m = {
+                "x1": float(w["x1"] - width / 2) / pixels_per_meter,
+                "y1": float(w["y1"] - height / 2) / pixels_per_meter,
+                "x2": float(w["x2"] - width / 2) / pixels_per_meter,
+                "y2": float(w["y2"] - height / 2) / pixels_per_meter
+            }
+            metric_walls.append(w_m)
+            all_walls.append(w_m)
+            metric_outline.append({"x": w_m["x1"], "y": w_m["y1"]})
+
+        xs = [p["x"] for p in metric_outline]
+        ys = [p["y"] for p in metric_outline]
+
+        rooms.append({
+            "label": f"Room {idx + 1}",
+            "dimensions": f"{(max(xs)-min(xs)):.1f}m x {(max(ys)-min(ys)):.1f}m",
+            "centerX": float(sum(xs) / len(xs)),
+            "centerY": float(sum(ys) / len(ys)),
+            "walls": metric_walls,
+            "outline": metric_outline,
+            "area": float(r_data["area_px"] / (pixels_per_meter ** 2))
+        })
+
+    # --- 4. OCR ROOM LABELS ---
     if TESSERACT_AVAILABLE and rooms:
         detected_labels = extract_room_labels(gray, width, height, pixels_per_meter)
         if detected_labels:
             rooms = match_labels_to_rooms(rooms, detected_labels)
 
-    # --- 4. ULTIMATE SAFETY FALLBACK ---
+    # --- 5. SAFETY BACKUP ---
     if not rooms:
-        fallback_outline = [
-            {"x": -12.0, "y": -9.0}, {"x": 12.0, "y": -9.0},
-            {"x": 12.0, "y": 9.0}, {"x": -12.0, "y": 9.0}
-        ]
-        fallback_walls = [
-            {"x1": -12.0, "y1": -9.0, "x2": 12.0, "y2": -9.0},
-            {"x1": 12.0, "y1": -9.0, "x2": 12.0, "y2": 9.0},
-            {"x1": 12.0, "y1": 9.0, "x2": -12.0, "y2": 9.0},
-            {"x1": -12.0, "y1": 9.0, "x2": -12.0, "y2": -9.0}
-        ]
-        rooms = [{
-            "label": "Main Living Space",
-            "dimensions": "24.0m x 18.0m",
-            "centerX": 0.0,
-            "centerY": 0.0,
-            "walls": fallback_walls,
-            "outline": fallback_outline,
-            "area": 432.0
-        }]
-        all_walls = fallback_walls
+        rooms = create_fallback_room(all_walls, wall_mask, width, height, pixels_per_meter)
 
     for room in rooms:
         room["all_walls"] = all_walls
+        if "outline" not in room:
+            room["outline"] = build_outline_from_walls(room["walls"])
 
-    result = {
+    return to_native({
         "rooms": rooms,
-        "labels": [r["label"] for r in rooms if not r["label"].startswith("Room ")],
+        "labels": [r["label"] for r in rooms if r.get("label") and not r["label"].startswith("Room ")],
         "totalRooms": len(rooms)
-    }
-    
-    return to_native(result)
+    })
 
 
 def extract_room_labels(gray, width, height, pixels_per_meter):
-    """Parses blueprint tags while omitting small noise parameters."""
+    """Extract room name labels from blueprint."""
     try:
         ocr_img = cv2.GaussianBlur(gray, (3, 3), 0)
         all_labels = []
         
-        custom_config = r'--oem 3 --psm 11'
-        ocr_data = pytesseract.image_to_data(ocr_img, output_type=pytesseract.Output.DICT, config=custom_config)
-        
-        # 🔥 FIX 2: Explicit exclusion list for appliance/dimension abbreviations causing clutter
-        blacklisted_tags = {"REF", "W/D", "DW", "OVEN", "LINEN", "PANTRY", "KIT", "CLG", "FP"}
-
-        for i in range(len(ocr_data['text'])):
-            text = ocr_data['text'][i].strip().upper()
-            conf = int(ocr_data['conf'][i])
+        for psm in [6, 3, 11]:
+            custom_config = f'--oem 3 --psm {psm}'
+            ocr_data = pytesseract.image_to_data(
+                ocr_img, 
+                output_type=pytesseract.Output.DICT, 
+                config=custom_config
+            )
             
-            if len(text) >= 3 and text.isalpha() and conf > 50:
-                if text in blacklisted_tags:
+            for i in range(len(ocr_data['text'])):
+                text = ocr_data['text'][i].strip()
+                conf = int(ocr_data['conf'][i])
+                
+                if not text or len(text) < 2 or conf < 30:
+                    continue
+                
+                text_lower = text.lower()
+                
+                if "'" in text or '"' in text or '/' in text:
+                    continue
+                if text.replace(".", "").replace(",", "").replace(" ", "").isdigit():
+                    continue
+                
+                skip_words = {'ft', 'sq', 'in', 'mm', 'cm', 'm', 'x', 'by', 'to', 'of', 'the', 'and', 'or', 'a', 'an'}
+                if text_lower in skip_words:
+                    continue
+                
+                digit_count = sum(1 for c in text if c.isdigit())
+                if digit_count / len(text) > 0.5:
                     continue
                 
                 tx = ocr_data['left'][i]
@@ -181,26 +215,171 @@ def extract_room_labels(gray, width, height, pixels_per_meter):
                 all_labels.append({
                     "text": text,
                     "x": float(tx + tw/2 - width/2) / pixels_per_meter,
-                    "y": float(ty + th/2 - height/2) / pixels_per_meter
+                    "y": float(ty + th/2 - height/2) / pixels_per_meter,
+                    "confidence": conf,
                 })
-        return all_labels
-    except Exception:
+        
+        filtered = []
+        for lbl in all_labels:
+            is_duplicate = False
+            for existing in filtered:
+                if (lbl['text'].lower() == existing['text'].lower() and
+                    math.hypot(lbl['x'] - existing['x'], lbl['y'] - existing['y']) < 2.0):
+                    is_duplicate = True
+                    if lbl['confidence'] > existing['confidence']:
+                        existing['confidence'] = lbl['confidence']
+                    break
+            if not is_duplicate:
+                filtered.append(lbl)
+        
+        return filtered
+    except Exception as e:
+        print(f"OCR extraction error: {e}")
         return []
 
 
 def match_labels_to_rooms(rooms, labels):
-    """Maps clean text tokens to physical room frames using proximity checks."""
-    for label in labels:
-        best_room = None
-        min_dist = float('inf')
+    """Match OCR labels to rooms by proximity."""
+    if not labels or not rooms:
+        return rooms
+    
+    labels = sorted(labels, key=lambda l: l['confidence'], reverse=True)
+    used_labels = set()
+    
+    for room in rooms:
+        best_label = None
+        best_dist = float('inf')
         
-        for room in rooms:
-            dist = math.hypot(room["centerX"] - label["x"], room["centerY"] - label["y"])
-            if dist < min_dist and dist < 8.0:  # Expanded lookahead radius for larger scale
-                min_dist = dist
-                best_room = room
-        
-        if best_room:
-            best_room["label"] = label["text"]
+        for i, label in enumerate(labels):
+            if i in used_labels:
+                continue
             
+            dist = math.hypot(room["centerX"] - label["x"], room["centerY"] - label["y"])
+            
+            if dist < best_dist and dist < 6.0:
+                best_dist = dist
+                best_label = label
+                best_idx = i
+        
+        if best_label:
+            room["label"] = best_label["text"]
+            room["labelConfidence"] = best_label["confidence"]
+            used_labels.add(best_idx)
+    
     return rooms
+
+
+def build_outline_from_walls(walls):
+    """
+    Best-effort ordered outline for rooms whose `walls` list is already a
+    closed loop. Just takes each wall's start point in order.
+    """
+    return [{"x": float(w["x1"]), "y": float(w["y1"])} for w in walls]
+
+
+def build_curve_aware_outline(wall_mask, width, height, pixels_per_meter,
+                               min_component_area_ratio=0.15, min_component_area_abs=500):
+    """
+    Build an exterior outline that follows curved wall segments (bay
+    windows, rounded walls, etc.) in addition to straight ones.
+    """
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(wall_mask, connectivity=8)
+    if num_labels <= 1:
+        return None
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    if len(areas) == 0 or areas.max() == 0:
+        return None
+
+    max_area = areas.max()
+    threshold = max(min_component_area_abs, min_component_area_ratio * max_area)
+    keep_labels = [i for i in range(1, num_labels) if stats[i, cv2.CC_STAT_AREA] >= threshold]
+    if not keep_labels:
+        return None
+
+    combined_mask = np.isin(labels, keep_labels)
+    ys, xs = np.nonzero(combined_mask)
+    if len(xs) < 3:
+        return None
+
+    max_points = 20000
+    if len(xs) > max_points:
+        stride = max(1, len(xs) // max_points)
+        xs = xs[::stride]
+        ys = ys[::stride]
+
+    pts = np.stack([xs, ys], axis=1).astype(np.float32).reshape(-1, 1, 2)
+    hull = cv2.convexHull(pts)
+    if len(hull) < 3:
+        return None
+
+    epsilon_px = 3.0
+    hull = cv2.approxPolyDP(hull, epsilon_px, True)
+    hull = hull.reshape(-1, 2)
+    if len(hull) < 3:
+        return None
+
+    return [
+        {"x": float(px - width / 2) / pixels_per_meter,
+         "y": float(py - height / 2) / pixels_per_meter}
+        for px, py in hull
+    ]
+
+
+def create_fallback_room(walls, wall_mask=None, width=None, height=None, pixels_per_meter=None):
+    """
+    Build a fallback 'whole blueprint' room when specific rectangular boundaries miss.
+    """
+    default_box = [{
+        "label": "Main Living Space",
+        "dimensions": "6.0m x 4.5m",
+        "centerX": 0.0,
+        "centerY": 0.0,
+        "walls": [
+            {"x1": -6.0, "y1": -4.5, "x2": 6.0, "y2": -4.5},
+            {"x1": 6.0, "y1": -4.5, "x2": 6.0, "y2": 4.5},
+            {"x1": 6.0, "y1": 4.5, "x2": -6.0, "y2": 4.5},
+            {"x1": -6.0, "y1": 4.5, "x2": -6.0, "y2": -4.5}
+        ],
+        "outline": [
+            {"x": -6.0, "y": -4.5}, {"x": 6.0, "y": -4.5},
+            {"x": 6.0, "y": 4.5}, {"x": -6.0, "y": 4.5}
+        ],
+        "all_walls": []
+    }]
+
+    outline = None
+    if wall_mask is not None and width and height and pixels_per_meter:
+        outline = build_curve_aware_outline(wall_mask, width, height, pixels_per_meter)
+
+    if not outline:
+        if not walls:
+            return default_box
+        points = []
+        for w in walls:
+            points.append((w["x1"], w["y1"]))
+            points.append((w["x2"], w["y2"]))
+        pts_arr = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
+        hull = cv2.convexHull(pts_arr).reshape(-1, 2)
+        if len(hull) < 3:
+            return default_box
+        outline = [{"x": float(x), "y": float(y)} for x, y in hull]
+
+    hull_walls = []
+    for i in range(len(outline)):
+        p1 = outline[i]
+        p2 = outline[(i + 1) % len(outline)]
+        hull_walls.append({"x1": p1["x"], "y1": p1["y"], "x2": p2["x"], "y2": p2["y"]})
+
+    xs = [p["x"] for p in outline]
+    ys = [p["y"] for p in outline]
+
+    return [{
+        "label": "Detected Space",
+        "dimensions": "Full Blueprint",
+        "centerX": float(sum(xs) / len(xs)),
+        "centerY": float(sum(ys) / len(ys)),
+        "walls": hull_walls,
+        "outline": outline,
+        "all_walls": walls
+    }]

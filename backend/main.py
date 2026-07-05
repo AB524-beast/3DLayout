@@ -1,92 +1,63 @@
+import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import os
-
-# Import the pipeline - handle import errors gracefully
-try:
-    from pipeline import process_blueprint_pipeline
-except ImportError as e:
-    print(f"WARNING: Could not import pipeline: {e}")
-    process_blueprint_pipeline = None
+from pipeline import process_blueprint_pipeline
 
 app = FastAPI(
-    title="FloorPlan3D Vision Core Engine", 
-    description="Transforms 2D structural document blueprints into volumetric layouts JSON blocks",
-    version="1.0.1"
+    title="3D Layout Pipeline API",
+    description="Universal 2D Blueprint to 3D Structured Layout Converter Engine",
+    version="1.0.0"
 )
 
-# CORS: Allow all origins for development, restrict in production
-allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+# --- CORS MIDDLEWARE SYSTEM ---
+# Crucial for allowing your React/Next.js frontend (running on a different port like 3000)
+# to securely transmit drag-and-drop file streams to this backend server.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=["*"],  # Change to your specific frontend URL (e.g. ["http://localhost:3000"]) in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint to verify backend is running."""
-    status = "ok" if process_blueprint_pipeline else "degraded"
-    return {"status": status, "version": "1.0.1"}
 
 @app.post("/api/v1/process-layout")
-async def upload_blueprint(file: UploadFile = File(...)):
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image (PNG, JPG, JPEG).")
-    
-    if not process_blueprint_pipeline:
-        raise HTTPException(status_code=503, detail="CV pipeline not available. Check server logs.")
+async def process_layout(file: UploadFile = File(...)):
+    """
+    Accepts raw multipart form image files dropped or browsed via the frontend,
+    reads them asynchronously, and extracts full structured 3D spatial definitions.
+    """
+    # 1. Validate MIME type explicitly for incoming drag-and-drop files
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid file type format: '{file.content_type}'. Please drop a valid JPEG or PNG blueprint asset."
+        )
     
     try:
+        # 2. Read file contents directly as raw binary streams
         image_bytes = await file.read()
         
-        # Validate image size (max 10MB)
-        if len(image_bytes) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="Image too large. Max size: 10MB.")
+        # 3. Process the file using your universal topological contour pipeline
+        structured_layout_json = process_blueprint_pipeline(image_bytes)
         
-        # Process through CV pipeline
-        result = process_blueprint_pipeline(image_bytes)
-        
-        # Validate result has rooms
-        if not result.get("rooms"):
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "error": "Could not detect room structures in image.",
-                    "rooms": [{
-                        "label": "Default Room",
-                        "dimensions": "6.0m x 4.5m",
-                        "centerX": 0.0,
-                        "centerY": 0.0,
-                        "walls": [
-                            {"x1": -6, "y1": -4.5, "x2": 6, "y2": -4.5},
-                            {"x1": 6, "y1": -4.5, "x2": 6, "y2": 4.5},
-                            {"x1": 6, "y1": 4.5, "x2": -6, "y2": 4.5},
-                            {"x1": -6, "y1": 4.5, "x2": -6, "y2": -4.5}
-                        ],
-                        "outline": [
-                            {"x": -6, "y": -4.5}, {"x": 6, "y": -4.5},
-                            {"x": 6, "y": 4.5}, {"x": -6, "y": 4.5}
-                        ]
-                    }]
-                }
-            )
-        
-        return result
-        
-    except HTTPException:
-        raise
-    except Exception as err:
-        import traceback
-        print(f"Pipeline error: {err}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(err)}")
+        # 4. Return clean, JSON-serializable native dict structures to the client
+        return structured_layout_json
+
+    except ValueError as val_err:
+        # Catch explicit image decoding format errors from OpenCV
+        raise HTTPException(status_code=422, detail=str(val_err))
+    except Exception as e:
+        # Catch unexpected pipeline runtime issues gracefully
+        raise HTTPException(status_code=500, detail=f"Pipeline processing error: {str(e)}")
+
+
+@app.get("/api/v1/health")
+def health_check():
+    """Simple connection gate to verify backend service status."""
+    return {"status": "healthy", "engine": "Universal Blueprint Topology Parser v1"}
+
 
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    # Start local server via script execution (python main.py)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
