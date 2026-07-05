@@ -1,224 +1,129 @@
-'use client';
+"use client";
+import React, { useState } from 'react';
+import BlueprintUploader from '@/components/BlueprintUploader';
 
-import { useState } from 'react';
-import FloorPlanCanvas from '@/components/FloorPlanCanvas';
-
-export default function Home() {
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState(null);
+export default function HomePage() {
   const [layoutData, setLayoutData] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [notice, setNotice] = useState(null);
-  const [activeRoom, setActiveRoom] = useState(null);
+  const [activeFloor, setActiveFloor] = useState(0);
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
-
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      if (!file.type.startsWith('image/')) {
-        setError('Please upload an image file (PNG, JPG, JPEG).');
-        return;
-      }
-      if (file.size > 10 * 1024 * 1024) {
-        setError('Image too large. Maximum size is 10MB.');
-        return;
-      }
-      setSelectedFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      setError(null);
-      setNotice(null);
-      setLayoutData(null);
-      setActiveRoom(null);
-    }
-  };
-
-  const handleUploadAndProcess = async () => {
-    if (!selectedFile) {
-      setError('Please choose a floor plan blueprint image first.');
-      return;
-    }
-
-    setIsLoading(true);
-    setError(null);
-    setNotice(null);
-    setActiveRoom(null);
-
-    const formData = new FormData();
-    formData.append('file', selectedFile);
-
-    try {
-      const response = await fetch(`${API_URL}/api/v1/process-layout`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `Backend error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (data.error) {
-        setNotice(data.error);
-      }
-      
-      setLayoutData(data);
-    } catch (err) {
-      console.error('Upload error:', err);
-      
-      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-        setError('Cannot connect to backend server. Please ensure the backend is running on ' + API_URL);
-      } else {
-        setError(err.message || 'An error occurred while processing the blueprint.');
-      }
-      
-      setLayoutData(null);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleRoomClick = (roomIndex) => {
-    setActiveRoom(activeRoom === roomIndex ? null : roomIndex);
+  const handleGenerationSuccess = (data) => {
+    console.log("Successfully loaded 3D Environment Model Data:", data);
+    setLayoutData(data);
+    setActiveFloor(0); // Reset to base floor on load
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      <nav className="border-b border-slate-800 bg-slate-900/50 backdrop-blur sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/30">3D</div>
-            <span className="text-xl font-black tracking-tight bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">FloorPlan3D Engine</span>
+    <div className="min-h-screen bg-black text-white font-sans selection:bg-blue-500/30">
+      {/* Dynamic Background Grid Pattern */}
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#0f172a_1px,transparent_1px),linear-gradient(to_bottom,#0f172a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] pointer-events-none" />
+
+      <div className="relative max-w-7xl mx-auto px-6 py-12">
+        {/* Header Block Section */}
+        <header className="text-center max-w-2xl mx-auto mb-10 space-y-3">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-blue-500/30 bg-blue-500/10 text-xs font-semibold text-blue-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+            Universal 3D Spatial Engine
           </div>
-          <span className="text-xs bg-slate-800 text-slate-400 px-3 py-1 rounded-full border border-slate-700">v1.0.1</span>
-        </div>
-      </nav>
+          <h1 className="text-4xl font-extrabold tracking-tight bg-gradient-to-b from-white to-gray-400 bg-clip-text text-transparent">
+            Blueprint Spatial Modeler
+          </h1>
+          <p className="text-sm text-gray-400 leading-relaxed">
+            Drop an image schematic layout or specify dimensions procedurally to extrude your flat structural maps into immediate orthogonal 3D models.
+          </p>
+        </header>
 
-      <div className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
-        {/* Left Panel - Upload & Room List */}
-        <section className="space-y-6">
-          {/* Upload Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 text-xs flex items-center justify-center font-mono">1</span>
-              Capture Blueprint Source
-            </h2>
-            <p className="text-xs text-slate-400 mb-4">Upload blueprint snapshots to generate 3D room layouts.</p>
-
-            <div className="mt-2 flex justify-center px-6 pt-5 pb-6 border-2 border-slate-800 border-dashed rounded-lg hover:border-slate-700 transition relative bg-slate-950/40">
-              <div className="space-y-1 text-center">
-                <svg className="mx-auto h-12 w-12 text-slate-500" stroke="currentColor" fill="none" viewBox="0 0 48 48">
-                  <path d="M28 8H12a4 4 0 00-4 4v20a4 4 0 004 4h16a4 4 0 004-4V12a4 4 0 00-4-4z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M14 26l7-7 21 21M26 18l3-3 8 8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                <div className="flex text-sm text-slate-400 justify-center">
-                  <label className="relative cursor-pointer bg-slate-900 rounded-md font-medium text-indigo-400 hover:text-indigo-300 focus-within:outline-none px-2 py-0.5 border border-slate-700">
-                    <span>Upload Image file</span>
-                    <input type="file" accept="image/*" className="sr-only" onChange={handleFileChange} />
-                  </label>
-                </div>
-                <p className="text-xs text-slate-500">PNG, JPG, JPEG supported</p>
-              </div>
-            </div>
-
-            {previewUrl && (
-              <div className="mt-4 rounded-lg overflow-hidden border border-slate-800 bg-slate-950 p-2">
-                <p className="text-xs font-semibold text-slate-400 mb-2">Source Blueprint Preview:</p>
-                <img src={previewUrl} alt="Blueprint preview" className="w-full max-h-48 object-contain rounded" />
-              </div>
-            )}
-
-            {error && (
-              <div className="mt-4 p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-lg text-xs font-medium">
-                ⚠️ {error}
-              </div>
-            )}
-
-            {notice && (
-              <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-lg text-xs font-medium">
-                ℹ️ {notice} Showing default room layout.
-              </div>
-            )}
-
-            <button
-              onClick={handleUploadAndProcess}
-              disabled={isLoading || !selectedFile}
-              className={`mt-5 w-full flex items-center justify-center py-3 px-4 rounded-lg text-sm font-bold shadow-lg transition-all ${
-                isLoading || !selectedFile
-                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
-                  : 'bg-indigo-600 hover:bg-indigo-500 hover:shadow-indigo-500/20 text-white'
-              }`}
-            >
-              {isLoading ? (
-                <div className="flex items-center space-x-2">
-                  <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-                  <span>Processing CV Pipeline...</span>
-                </div>
-              ) : (
-                'Generate 3D Environment Model'
-              )}
-            </button>
-          </div>
-
-          {/* Room List / Interactive Buttons */}
-          {layoutData && layoutData.rooms && layoutData.rooms.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
-              <h2 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-xs flex items-center justify-center font-mono">2</span>
-                Detected Rooms ({layoutData.totalRooms || layoutData.rooms.length})
-              </h2>
-              <p className="text-xs text-slate-400 mb-4">Click a room to highlight it in the 3D view.</p>
-              
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {layoutData.rooms.map((room, index) => (
-                  <button
-                    key={index}
-                    onClick={() => handleRoomClick(index)}
-                    className={`w-full text-left p-3 rounded-lg border transition-all duration-200 ${
-                      activeRoom === index
-                        ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-lg shadow-indigo-500/10'
-                        : 'bg-slate-800/50 border-slate-700 text-slate-300 hover:bg-slate-800 hover:border-slate-600'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${activeRoom === index ? 'bg-indigo-400 animate-pulse' : 'bg-slate-500'}`} />
-                        <span className="font-semibold text-sm">{room.label || `Room ${index + 1}`}</span>
-                      </div>
-                      <span className="text-xs text-slate-400 font-mono">{room.dimensions}</span>
-                    </div>
-                    <div className="mt-1 text-xs text-slate-500 pl-4">
-                      Center: ({room.centerX?.toFixed(1)}m, {room.centerY?.toFixed(1)}m) • {room.walls?.length || 0} walls
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* Right Panel - 3D Canvas */}
-        <section className="lg:col-span-2 space-y-4">
-          <div className="flex justify-between items-center">
-            <h2 className="text-lg font-bold text-white flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-400 text-xs flex items-center justify-center font-mono">3</span>
-              Interactive Real-Time 3D WebGL Mesh Canvas
-            </h2>
-            {layoutData && (
-              <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
-                ● Geometry Realized
-              </span>
-            )}
-          </div>
+        {/* Workspace Layout Matrix */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           
-          <FloorPlanCanvas layoutData={layoutData} activeRoom={activeRoom} />
-        </section>
+          {/* LEFT PANEL: Immediate Generation Controller */}
+          <div className="lg:col-span-5 bg-gray-950/60 border border-gray-800/80 rounded-2xl p-6 backdrop-blur-xl shadow-2xl space-y-6">
+            <div>
+              <h2 className="text-base font-bold text-gray-200">Layout Specifications</h2>
+              <p className="text-xs text-gray-500">Configure parameters to instantly assemble environmental geometries.</p>
+            </div>
+            
+            <hr className="border-gray-900" />
+            
+            {/* The Integrated Parameter Engine Uploader component injected directly on page layout */}
+            <BlueprintUploader onUploadSuccess={handleGenerationSuccess} />
+          </div>
 
+          {/* RIGHT PANEL: Interactive WebGL Canvas Projections Viewer Bounding Box */}
+          <div className="lg:col-span-7 flex flex-col h-[580px] bg-gray-950/40 border border-gray-800/60 rounded-2xl overflow-hidden backdrop-blur-md relative shadow-2xl">
+            {layoutData ? (
+              <>
+                {/* Active Interactive Top Bar Overlays */}
+                <div className="absolute top-4 left-4 z-20 bg-gray-900/90 border border-gray-800 rounded-xl px-3 py-2 flex items-center gap-4 text-xs">
+                  <div>
+                    <span className="text-gray-500 mr-1">Parsed Rooms:</span>
+                    <span className="font-bold text-blue-400">{layoutData.totalRooms}</span>
+                  </div>
+                  <div className="w-px h-3 bg-gray-800" />
+                  <div>
+                    <span className="text-gray-500 mr-1">Layers:</span>
+                    <span className="font-bold text-purple-400">{layoutData.totalFloors || 1} Story</span>
+                  </div>
+                </div>
+
+                {/* Multi-Floor Toggle Controller Matrix */}
+                {layoutData.totalFloors > 1 && (
+                  <div className="absolute top-4 right-4 z-20 flex gap-1 bg-gray-900/90 border border-gray-800 p-1 rounded-lg">
+                    {Array.from({ length: layoutData.totalFloors }).map((_, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setActiveFloor(idx)}
+                        className={`px-2.5 py-1 text-[10px] font-bold uppercase rounded-md transition-colors ${
+                          activeFloor === idx 
+                            ? 'bg-blue-600 text-white' 
+                            : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                        }`}
+                      >
+                        Lvl {idx + 1}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Interactive View Matrix Bounding Window Placeholder */}
+                <div className="w-full h-full flex flex-col items-center justify-center bg-gray-950 text-center relative p-6">
+                  {/* Your Three.js or WebGL Canvas element initializes directly right here */}
+                  <div className="space-y-2 pointer-events-none z-10 max-w-sm">
+                    <svg className="w-12 h-12 text-blue-500/40 mx-auto animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
+                    </svg>
+                    <p className="text-xs font-semibold text-gray-300">Initial Flat Ortho View Mounted</p>
+                    <p className="text-[11px] text-gray-500 leading-normal">
+                      Rendering structural wall matrices centered for level {activeFloor + 1}. Rotate or click viewports to modify perspectives.
+                    </p>
+                  </div>
+                  
+                  {/* Structural Coordinate Debug Ledger */}
+                  <div className="absolute bottom-4 left-4 right-4 max-h-32 overflow-y-auto bg-black/50 rounded-xl p-3 border border-gray-900 text-left font-mono text-[10px] text-gray-500 space-y-1">
+                    <div>{`// Initializing Top-Down View Perspective`}</div>
+                    {layoutData.rooms.map((rm, i) => (
+                      <div key={i}>
+                        {`-> Extruded "${rm.label}" | Elevation Z: ${rm.elevationZ}m | Area: ${rm.area.toFixed(1)}m²`}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              /* Blank State Canvas Empty Matrix UI Window View */
+              <div className="w-full h-full flex flex-col items-center justify-center border-2 border-dashed border-gray-900/60 rounded-2xl bg-gray-950/20 text-center p-8">
+                <div className="w-12 h-12 rounded-xl bg-gray-900 flex items-center justify-center border border-gray-800 text-gray-600 mb-4">
+                  🧱
+                </div>
+                <h3 className="text-sm font-semibold text-gray-400">WebGL Canvas Target Viewport</h3>
+                <p className="text-xs text-gray-600 max-w-xs mt-1">
+                  Configure structural variables on the control deck to launch the real-time layout matrix calculations.
+                </p>
+              </div>
+            )}
+          </div>
+
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
