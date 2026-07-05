@@ -47,8 +47,8 @@ def snap_to_ortho(p1, p2, threshold_deg=5.0):
 
 def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     """
-    Transforms any 2D blueprint image map into a structured 3D coordinate model.
-    Uses ensemble thresholding and robust contour topological segmentation.
+    Transforms any 2D blueprint image map into a structured model oriented
+    perfectly for an immediate flat ortho top-down view on render initialization.
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -58,11 +58,11 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     height, width = img_bgr.shape[:2]
     img_area = width * height
 
-    # --- 1. ENSEMBLE PREPROCESSING (Fixes low contrast and multi-weight lines) ---
+    # --- 1. ENSEMBLE PREPROCESSING (Fixes low contrast and structural weights) ---
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    # Dual-path thresholding captures faint lines alongside solid structural bounds
+    # Dual-path adaptive thresholds isolate structural boundaries
     thresh_fine = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 5)
     thresh_coarse = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 9)
     wall_mask = cv2.bitwise_or(thresh_fine, thresh_coarse)
@@ -81,7 +81,7 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     rooms = []
     all_walls = []
     
-    # Track outer boundaries for relative scaling calibration
+    # Track boundaries for relative spatial scale distribution
     min_x_px, max_x_px = float('inf'), float('-inf')
     min_y_px, max_y_px = float('inf'), float('-inf')
     
@@ -90,6 +90,7 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     if contours:
         for cnt in contours:
             area = cv2.contourArea(cnt)
+            # Filter layout dimensions safely to avoid parsing standard margin borders
             if area < (img_area * 0.003) or area > (img_area * 0.92):
                 continue
 
@@ -159,6 +160,7 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
     if not rooms:
         rooms = create_fallback_room(all_walls, wall_mask, width, height, pixels_per_meter)
 
+    # Inject synchronized universal structures to hold perfect 2D flat projections first
     for room in rooms:
         room["all_walls"] = all_walls
         if "outline" not in room:
@@ -172,7 +174,7 @@ def process_blueprint_pipeline(image_bytes: bytes) -> dict:
 
 
 def extract_room_labels(gray, width, height, pixels_per_meter):
-    """Extract room name labels from blueprint."""
+    """Extract room name labels from blueprint using OCR."""
     try:
         ocr_img = cv2.GaussianBlur(gray, (3, 3), 0)
         all_labels = []
@@ -193,7 +195,6 @@ def extract_room_labels(gray, width, height, pixels_per_meter):
                     continue
                 
                 text_lower = text.lower()
-                
                 if "'" in text or '"' in text or '/' in text:
                     continue
                 if text.replace(".", "").replace(",", "").replace(" ", "").isdigit():
@@ -239,7 +240,7 @@ def extract_room_labels(gray, width, height, pixels_per_meter):
 
 
 def match_labels_to_rooms(rooms, labels):
-    """Match OCR labels to rooms by proximity."""
+    """Match OCR labels to rooms by close geographical coordinate proximity."""
     if not labels or not rooms:
         return rooms
     
@@ -255,7 +256,6 @@ def match_labels_to_rooms(rooms, labels):
                 continue
             
             dist = math.hypot(room["centerX"] - label["x"], room["centerY"] - label["y"])
-            
             if dist < best_dist and dist < 6.0:
                 best_dist = dist
                 best_label = label
@@ -270,19 +270,13 @@ def match_labels_to_rooms(rooms, labels):
 
 
 def build_outline_from_walls(walls):
-    """
-    Best-effort ordered outline for rooms whose `walls` list is already a
-    closed loop. Just takes each wall's start point in order.
-    """
+    """Maps coordinates explicitly to preserve top-down orientation arrays."""
     return [{"x": float(w["x1"]), "y": float(w["y1"])} for w in walls]
 
 
 def build_curve_aware_outline(wall_mask, width, height, pixels_per_meter,
                                min_component_area_ratio=0.15, min_component_area_abs=500):
-    """
-    Build an exterior outline that follows curved wall segments (bay
-    windows, rounded walls, etc.) in addition to straight ones.
-    """
+    """Build an exterior outline tracking complex curved wall layouts structural paths."""
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(wall_mask, connectivity=8)
     if num_labels <= 1:
         return None
@@ -327,9 +321,7 @@ def build_curve_aware_outline(wall_mask, width, height, pixels_per_meter,
 
 
 def create_fallback_room(walls, wall_mask=None, width=None, height=None, pixels_per_meter=None):
-    """
-    Build a fallback 'whole blueprint' room when specific rectangular boundaries miss.
-    """
+    """Builds a flat safety boundary outline array if normal topology parsing misses."""
     default_box = [{
         "label": "Main Living Space",
         "dimensions": "6.0m x 4.5m",
