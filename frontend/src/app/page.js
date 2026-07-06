@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import BlueprintUploader from '@/components/BlueprintUploader';
 import FloorPlanCanvas from '@/components/FloorPlanCanvas';
 
@@ -9,15 +9,28 @@ export default function HomePage() {
   const [activeFloor, setActiveFloor] = useState(0);
   const [uploadedImageUrl, setUploadedImageUrl] = useState("");
 
+  useEffect(() => {
+    // Cleanup previous object URL when it changes, and on unmount.
+    return () => {
+      if (uploadedImageUrl) URL.revokeObjectURL(uploadedImageUrl);
+    };
+  }, [uploadedImageUrl]);
+
   const handleGenerationSuccess = (data, localFile) => {
     setLayoutData(data);
-    setActiveFloor(0); 
+    setActiveFloor(0);
+
+    // Revoke previous object URL to avoid memory leaks.
+    setUploadedImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return "";
+    });
 
     if (localFile) {
       const objectUrl = URL.createObjectURL(localFile);
       setUploadedImageUrl(objectUrl);
     } else {
-      setUploadedImageUrl(""); 
+      setUploadedImageUrl("");
     }
   };
 
@@ -86,7 +99,7 @@ export default function HomePage() {
                 </div>
                 
                 <div className="absolute bottom-4 left-4 right-4 max-h-24 overflow-y-auto bg-black/80 rounded-xl p-3 border border-gray-900 text-left font-mono text-[10px] text-gray-400 z-20 custom-scrollbar">
-                  <div className="text-blue-400 font-bold mb-1">// Active Environment Projection Streams:</div>
+                  <div className="text-blue-400 font-bold mb-1">{"// Active Environment Projection Streams:"}</div>
                   {layoutData.rooms?.map((rm, i) => {
                     const computedArea = typeof rm.area === 'number' 
                       ? rm.area.toFixed(1) 

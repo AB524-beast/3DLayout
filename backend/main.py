@@ -10,7 +10,12 @@ import math
 import json
 import os
 
-from pipeline import BlueprintWatershedPipeline
+try:
+    # When running via `python backend/main.py` or uvicorn from backend/.
+    from pipeline import BlueprintWatershedPipeline
+except ModuleNotFoundError:
+    # When running uvicorn from repo root (so `backend` is importable as a package).
+    from backend.pipeline import BlueprintWatershedPipeline
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_ROOMS_PATH = os.path.join(BASE_DIR, "blueprint_rooms.json")

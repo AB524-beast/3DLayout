@@ -14,7 +14,7 @@ export default function BlueprintUploader({ onUploadSuccess }) {
   const [numRooms, setNumRooms] = useState(4);
   const [roomsConfig, setRoomsConfig] = useState([]);
 
-  const BACKEND_URL = "http://127.0.0.1:8000/api/v1/process-layout";
+  const BACKEND_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000") + "/api/v1/process-layout";
 
   const initializeWizardStepTwo = () => {
     const baselineRoomSize = Math.floor((targetSqFt * 0.75) / numRooms); 
