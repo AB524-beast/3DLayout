@@ -1,0 +1,18 @@
+# Ignore YOLO training runs and weights
+runs/
+*.pt
+
+# Ignore raw datasets
+Segmenting-a-Floor-Plan-1/
+absolute/path/to/any/other/dataset/
+
+# Optional: Ignore local JSON outputs if they get massive
+# blueprint_rooms.json
+
+# Ignore Python virtual environments
+backend/venv/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
