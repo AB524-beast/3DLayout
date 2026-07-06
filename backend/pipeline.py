@@ -27,8 +27,11 @@ class BlueprintWatershedPipeline:
 
         h, w = img.shape
         rooms_output = []
-        max_dim = float(max(w, h))
-        px_to_meter = max_dim / self.target_dim
+
+        # Match FloorPlanCanvas.js exactly: planeHeight is fixed to target_dim
+        # and planeWidth = target_dim * aspect, so pixel->meter conversion must
+        # be based on image HEIGHT, not the max dimension.
+        px_to_meter = float(h) / self.target_dim
 
         # 1. Binarize and invert (Walls = White, Empty Space = Black)
         _, binary = cv2.threshold(img, 200, 255, cv2.THRESH_BINARY_INV)
@@ -38,33 +41,40 @@ class BlueprintWatershedPipeline:
         thick_walls = cv2.dilate(binary, kernel, iterations=3)
 
         # 3. Calculate Distance Transform on the EMPTY space
-        # We invert it back so Empty Space = White. 
-        # Distance transform assigns a high value to pixels furthest from any wall.
         empty_space = cv2.bitwise_not(thick_walls)
         distance_map = cv2.distanceTransform(empty_space, cv2.DIST_L2, 5)
 
-        # 4. Find the absolute centers of the rooms (local maxima in the distance map)
-        local_max_coords = peak_local_max(distance_map, min_distance=20, labels=empty_space)
+        # 4. Find the absolute centers of the rooms (local maxima in the distance map).
+        # min_distance is scaled to the image size (rather than a fixed 20px) and
+        # a minimum distance-value threshold is enforced so small nooks created by
+        # furniture icons, dashed lines, or a printed grid don't each spawn their
+        # own basin — this was previously causing real blueprints to be shredded
+        # into dozens of tiny fragments instead of whole rooms.
+        min_dist_px = max(20, int(min(w, h) * 0.05))
+        local_max_coords = peak_local_max(
+            distance_map,
+            min_distance=min_dist_px,
+            labels=empty_space,
+            threshold_abs=min_dist_px * 0.6
+        )
         local_max_mask = np.zeros(distance_map.shape, dtype=bool)
-        local_max_mask[tuple(local_max_coords.T)] = True
-        
+        if len(local_max_coords) > 0:
+            local_max_mask[tuple(local_max_coords.T)] = True
+
         # 5. Create markers for the Watershed algorithm
         markers, num_features = ndimage.label(local_max_mask)
 
         # 6. Apply Watershed to segment the image into distinct room basins
-        # Convert to 3 channel as cv2.watershed requires it
         img_color = cv2.cvtColor(thick_walls, cv2.COLOR_GRAY2BGR)
         labels = cv2.watershed(img_color, np.int32(markers))
 
         # 7. Extract the bounding geometries of each flooded room
-        for label_idx in range(1, num_features + 1): # Skip 0 (background) and -1 (borders)
+        for label_idx in range(1, num_features + 1):  # Skip 0 (background) and -1 (borders)
             mask = np.zeros_like(img, dtype=np.uint8)
             mask[labels == label_idx] = 255
 
-            # Find the bounding box of this specific room basin
             x_px, y_px, w_px, h_px = cv2.boundingRect(mask)
-            
-            # Filter out massive background areas or tiny text remnants
+
             area = w_px * h_px
             if area < (w * h * 0.02) or area > (w * h * 0.85):
                 continue
@@ -74,7 +84,13 @@ class BlueprintWatershedPipeline:
             rw = w_px / px_to_meter
             rh = h_px / px_to_meter
 
-            if 1.0 <= rw <= self.target_dim and 1.0 <= rh <= self.target_dim:
+            # Discard fragments too small to plausibly be a real room (roughly
+            # under 6 sq. meters / ~65 sq. ft) — this is what filters out
+            # bathroom-fixture nooks and hallway slivers.
+            if rw < 1.8 or rh < 1.8 or (rw * rh) < 5.5:
+                continue
+
+            if rw <= self.target_dim * (w / h) and rh <= self.target_dim:
                 rooms_output.append({
                     "label": f"Parsed Space {len(rooms_output) + 1}",
                     "dimensions": f"{rw:.1f}m x {rh:.1f}m",
@@ -87,8 +103,6 @@ class BlueprintWatershedPipeline:
                 })
 
         # 8. Open3D Point Cloud Fallback
-        # If Watershed fails to capture enclosed zones, project the wall pixels 
-        # into 3D space to wrap the entire structural footprint.
         if not rooms_output:
             try:
                 y_indices, x_indices = np.where(thick_walls > 0)
@@ -98,15 +112,15 @@ class BlueprintWatershedPipeline:
                     pts = np.zeros((len(x_norm), 3))
                     pts[:, 0] = x_norm
                     pts[:, 2] = y_norm
-                    
+
                     pcd = o3d.geometry.PointCloud()
                     pcd.points = o3d.utility.Vector3dVector(pts)
                     obb = pcd.get_axis_aligned_bounding_box()
-                    
+
                     cx, cz = float(obb.get_center()[0]), float(obb.get_center()[2])
                     extent = obb.get_extent()
                     rw, rh = float(extent[0]), float(extent[2])
-                    
+
                     rooms_output.append({
                         "label": "Global Structural Layout (O3D)",
                         "dimensions": f"{rw:.1f}m x {rh:.1f}m",

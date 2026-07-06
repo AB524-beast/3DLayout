@@ -67,6 +67,21 @@ export default function BlueprintUploader({ onUploadSuccess }) {
     }
   };
 
+  const loadSampleLayout = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`${BACKEND_URL}/sample?floors=${numFloors}`);
+      if (!response.ok) throw new Error('No cached sample layout available on the server.');
+      const data = await response.json();
+      if (onUploadSuccess) onUploadSuccess(data, null);
+    } catch (err) {
+      setError(err.message || 'Error loading sample layout.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const processImageFile = async (file) => {
     if (!file || !file.type.startsWith('image/')) {
       setError('Please provide a valid schematic picture file.');
@@ -118,6 +133,14 @@ export default function BlueprintUploader({ onUploadSuccess }) {
             <input type="file" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" onChange={(e) => e.target.files?.[0] && processImageFile(e.target.files[0])} accept="image/*" />
             <p className="text-sm font-medium text-gray-300">{isLoading ? "Running recognition logic..." : "Drag & drop image blueprint layout here, or click to browse"}</p>
           </div>
+          <button
+            type="button"
+            onClick={loadSampleLayout}
+            disabled={isLoading}
+            className="w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 font-semibold py-2 rounded-xl text-xs uppercase tracking-wider transition-all disabled:opacity-50"
+          >
+            🗂️ Load Cached Sample Layout
+          </button>
         </div>
       ) : (
         <div className="bg-gray-950 border border-gray-800 rounded-xl p-4 space-y-4">
