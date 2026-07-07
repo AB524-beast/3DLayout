@@ -59,18 +59,60 @@ export default function RoomExtrusionCanvas({
 
     const wallHeight = 2.4;
     const wallThickness = 0.15;
+    // Minimum wall length to render. Raw traced polygons contain tiny
+    // pixel-level "staircase" teeth (often < 0.2m) that create overlapping,
+    // blobby geometry when each one is extruded as its own box. Anything
+    // shorter than this is noise, not a real wall.
+    const MIN_WALL_LENGTH = 0.3;
+    // Segments whose direction differs by less than this (radians) are
+    // treated as collinear and merged into one continuous wall.
+    const COLLINEAR_ANGLE_EPS = 0.06;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.2 });
     const openMat = new THREE.MeshStandardMaterial({ color: 0x10b981, transparent: true, opacity: 0.35 });
+
+    // Merge consecutive collinear/near-duplicate wall segments into single
+    // straight runs before rendering, so a jagged traced outline collapses
+    // into clean walls instead of many overlapping short boxes.
+    const mergeCollinearWalls = (walls) => {
+      if (!walls || walls.length === 0) return [];
+
+      const merged = [];
+      let current = { ...walls[0] };
+
+      for (let i = 1; i < walls.length; i++) {
+        const w = walls[i];
+        const prevAngle = Math.atan2(current.y2 - current.y1, current.x2 - current.x1);
+        const newAngle = Math.atan2(w.y2 - w.y1, w.x2 - w.x1);
+        let angleDiff = Math.abs(prevAngle - newAngle);
+        if (angleDiff > Math.PI) angleDiff = Math.abs(angleDiff - 2 * Math.PI);
+
+        const touchesEnd =
+          Math.hypot(w.x1 - current.x2, w.y1 - current.y2) < 0.05;
+
+        if (touchesEnd && angleDiff < COLLINEAR_ANGLE_EPS) {
+          // Extend the current run instead of starting a new wall
+          current.x2 = w.x2;
+          current.y2 = w.y2;
+        } else {
+          merged.push(current);
+          current = { ...w };
+        }
+      }
+      merged.push(current);
+      return merged;
+    };
 
     const addWalls = () => {
       rooms.filter(floorFilter).forEach((room) => {
         const baseZ = room.elevationZ || 0;
 
-        (room.walls || []).forEach((wall) => {
+        const cleanedWalls = mergeCollinearWalls(room.walls || []);
+
+        cleanedWalls.forEach((wall) => {
           const dx = wall.x2 - wall.x1;
           const dy = wall.y2 - wall.y1;
           const length = Math.hypot(dx, dy);
-          if (length < 0.02) return;
+          if (length < MIN_WALL_LENGTH) return;
 
           // Trace edge as a vertical box (extrusion)
           const geo = new THREE.BoxGeometry(length, wallHeight, wallThickness);
@@ -149,4 +191,3 @@ export default function RoomExtrusionCanvas({
 
   return <div ref={containerRef} className="w-full h-full min-h-[500px]" />;
 }
-
