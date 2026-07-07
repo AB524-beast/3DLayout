@@ -59,13 +59,24 @@ class BlueprintWatershedPipeline:
 
             cnt = room_contours[0]
             area_px = cv2.contourArea(cnt)
-            if area_px < (w * h * 0.001) or area_px > (w * h * 0.85):
+            if area_px < (w * h * 0.003) or area_px > (w * h * 0.80):
                 continue
 
-            epsilon = 0.02 * cv2.arcLength(cnt, True)
+            peri = cv2.arcLength(cnt, True)
+            if peri <= 0:
+                continue
+
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            if hull_area <= 0:
+                continue
+            if area_px / hull_area < 0.45:
+                continue
+
+            epsilon = 0.02 * peri
             approx = cv2.approxPolyDP(cnt, epsilon, True)
 
-            if len(approx) < 3:
+            if len(approx) < 4:
                 continue
 
             pts_m = []
@@ -80,7 +91,12 @@ class BlueprintWatershedPipeline:
             bb_w = max(xs) - min(xs)
             bb_h = max(ys) - min(ys)
 
-            if bb_w < 0.15 or bb_h < 0.15 or bb_w > 18.0 or bb_h > 18.0:
+            if bb_w < 0.3 or bb_h < 0.3 or bb_w > 18.0 or bb_h > 18.0:
+                continue
+
+            min_side = min(bb_w, bb_h)
+            max_side = max(bb_w, bb_h)
+            if max_side > 0 and min_side / max_side < 0.06:
                 continue
 
             rooms.append({
@@ -120,26 +136,22 @@ class BlueprintWatershedPipeline:
 
         candidates = []
 
-        # Strategy W1: Otsu threshold wall mask
         def w_otsu():
             _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel5, iterations=3)
         candidates.append(self._watershed_from_mask(w_otsu(), img_color, w, h, px_to_meter))
 
-        # Strategy W2: Otsu on HSV value
         def w_otsu_hsv():
             _, binary = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel5, iterations=3)
         candidates.append(self._watershed_from_mask(w_otsu_hsv(), img_color, w, h, px_to_meter))
 
-        # Strategy W3: Adaptive threshold
         def w_adaptive():
             binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                             cv2.THRESH_BINARY_INV, 15, 4)
             return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel5, iterations=2)
         candidates.append(self._watershed_from_mask(w_adaptive(), img_color, w, h, px_to_meter))
 
-        # Strategy W4: Canny edge wall mask
         def w_canny():
             med = np.median(blurred)
             lower = int(max(0, 0.3 * med))
@@ -149,7 +161,6 @@ class BlueprintWatershedPipeline:
             return cv2.dilate(closed, kernel3, iterations=2)
         candidates.append(self._watershed_from_mask(w_canny(), img_color, w, h, px_to_meter))
 
-        # Pick best candidate
         best_rooms = []
         best_score = -1
         for rooms in candidates:
@@ -158,9 +169,11 @@ class BlueprintWatershedPipeline:
             n = len(rooms)
             areas = [r["area"] for r in rooms]
             mean_area = sum(areas) / n
-            score = min(n, 20) * 10
-            if 0.5 < mean_area < 80:
-                score += 20
+            score = min(n, 12) * 15
+            if 2 < mean_area < 80:
+                score += 25
+            if all(0.5 < a < 120 for a in areas):
+                score += 15
             if n >= 2:
                 score += 5
             if score > best_score:
