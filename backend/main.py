@@ -51,8 +51,8 @@ def generate_box_walls(cx: float, cy: float, width: float, height: float) -> Lis
     ]
 
 def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: float,
-                                min_rel_area: float = 0.003, max_rel_area: float = 0.80,
-                                min_dim_m: float = 0.3, max_dim_m: float = 18.0,
+                                min_rel_area: float = 0.001, max_rel_area: float = 0.85,
+                                min_dim_m: float = 0.15, max_dim_m: float = 18.0,
                                 use_hierarchy: bool = True, invert_parent: bool = True) -> List[Dict[str, Any]]:
     rooms = []
     method = cv2.RETR_TREE if use_hierarchy else cv2.RETR_EXTERNAL
@@ -215,12 +215,88 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     candidates.append(_try_strategy(simple_binary, "simple_binary", w, h, px_to_meter,
                                      min_rel_area=0.002, min_dim_m=0.2))
 
+    # Strategy I: Flood-fill room detection (invert + remove exterior via flood fill)
+    def floodfill_rooms():
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel5, iterations=4)
+        inv = cv2.bitwise_not(closed)
+        hh, ww = inv.shape
+        mask = np.zeros((hh + 2, ww + 2), np.uint8)
+        cv2.floodFill(inv, mask, (0, 0), 0)
+        cv2.floodFill(inv, mask, (ww - 1, 0), 0)
+        cv2.floodFill(inv, mask, (0, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww // 2, 0), 0)
+        cv2.floodFill(inv, mask, (ww // 2, hh - 1), 0)
+        cv2.floodFill(inv, mask, (0, hh // 2), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh // 2), 0)
+        return inv
+    candidates.append(_try_strategy(floodfill_rooms, "floodfill_rooms", w, h, px_to_meter,
+                                     use_hierarchy=False, min_dim_m=0.15, min_rel_area=0.001))
+
+    # Strategy J: Flood-fill with HSV Otsu base
+    def floodfill_hsv():
+        _, binary = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel5, iterations=4)
+        inv = cv2.bitwise_not(closed)
+        hh, ww = inv.shape
+        mask = np.zeros((hh + 2, ww + 2), np.uint8)
+        cv2.floodFill(inv, mask, (0, 0), 0)
+        cv2.floodFill(inv, mask, (ww - 1, 0), 0)
+        cv2.floodFill(inv, mask, (0, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww // 2, 0), 0)
+        cv2.floodFill(inv, mask, (ww // 2, hh - 1), 0)
+        cv2.floodFill(inv, mask, (0, hh // 2), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh // 2), 0)
+        return inv
+    candidates.append(_try_strategy(floodfill_hsv, "floodfill_hsv", w, h, px_to_meter,
+                                     use_hierarchy=False, min_dim_m=0.15, min_rel_area=0.001))
+
+    # Strategy K: Very aggressive flood-fill — low threshold + large kernel
+    def floodfill_aggressive():
+        _, binary = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY_INV)
+        kernel11 = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel11, iterations=3)
+        inv = cv2.bitwise_not(closed)
+        hh, ww = inv.shape
+        mask = np.zeros((hh + 2, ww + 2), np.uint8)
+        cv2.floodFill(inv, mask, (0, 0), 0)
+        cv2.floodFill(inv, mask, (ww - 1, 0), 0)
+        cv2.floodFill(inv, mask, (0, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww // 2, 0), 0)
+        cv2.floodFill(inv, mask, (ww // 2, hh - 1), 0)
+        cv2.floodFill(inv, mask, (0, hh // 2), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh // 2), 0)
+        return inv
+    candidates.append(_try_strategy(floodfill_aggressive, "floodfill_aggressive", w, h, px_to_meter,
+                                     use_hierarchy=False, min_dim_m=0.10, min_rel_area=0.001))
+
     best_rooms = []
     best_score = -1
+
+    # Deduplicate candidates by center proximity
+    def dedup_rooms(rooms):
+        if len(rooms) < 2:
+            return rooms
+        kept = []
+        for r in rooms:
+            dup = False
+            for k in kept:
+                dx = abs(r["centerX"] - k["centerX"])
+                dy = abs(r["centerY"] - k["centerY"])
+                if dx < 0.5 and dy < 0.5:
+                    dup = True
+                    break
+            if not dup:
+                kept.append(r)
+        return kept
 
     for rooms in candidates:
         if not rooms:
             continue
+        rooms = dedup_rooms(rooms)
         n = len(rooms)
         if n == 0:
             continue
@@ -228,18 +304,38 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
         mean_area = sum(areas) / n
         std_area = (sum((a - mean_area) ** 2 for a in areas) / n) ** 0.5 if n > 1 else 0
 
-        score = min(n, 20) * 10
+        score = min(n, 12) * 15
         if 0.5 < mean_area < 80:
             score += 20
         if std_area < mean_area * 0.8:
-            score += 10
+            score += 3
         if n >= 2:
             score += 5
+        if mean_area > 5:
+            score += 10
+        if all(a < 300 for a in areas):
+            score += 10
 
         if score > best_score:
             best_score = score
             best_rooms = rooms
 
+    if not best_rooms:
+        kernel15 = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        closed = cv2.morphologyEx(cv2.bitwise_not(enhanced), cv2.MORPH_CLOSE, kernel15, iterations=2)
+        inv = cv2.bitwise_not(closed)
+        hh, ww = inv.shape
+        mask = np.zeros((hh + 2, ww + 2), np.uint8)
+        cv2.floodFill(inv, mask, (0, 0), 0)
+        cv2.floodFill(inv, mask, (ww - 1, 0), 0)
+        cv2.floodFill(inv, mask, (0, hh - 1), 0)
+        cv2.floodFill(inv, mask, (ww - 1, hh - 1), 0)
+        last_rooms = _extract_rooms_from_binary(inv, w, h, px_to_meter,
+                                                  use_hierarchy=False,
+                                                  min_dim_m=0.10, min_rel_area=0.001,
+                                                  max_rel_area=0.95)
+        if last_rooms:
+            return last_rooms
     return best_rooms
 
 def simplify_polygon(points_px: List[List[float]], epsilon_ratio: float = 0.01) -> List[List[float]]:
