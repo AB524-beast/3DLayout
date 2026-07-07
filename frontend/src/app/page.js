@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import BlueprintUploader from '@/components/BlueprintUploader';
-import FloorPlanCanvas from '@/components/FloorPlanCanvas';
+import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas'; // 3D viewport
 
 export default function HomePage() {
   const [layoutData, setLayoutData] = useState(null);
@@ -10,7 +10,6 @@ export default function HomePage() {
   const [uploadedImageUrl, setUploadedImageUrl] = useState("");
 
   useEffect(() => {
-    // Cleanup previous object URL when it changes, and on unmount.
     return () => {
       if (uploadedImageUrl) URL.revokeObjectURL(uploadedImageUrl);
     };
@@ -20,7 +19,6 @@ export default function HomePage() {
     setLayoutData(data);
     setActiveFloor(0);
 
-    // Revoke previous object URL to avoid memory leaks.
     setUploadedImageUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return "";
@@ -91,7 +89,7 @@ export default function HomePage() {
                 )}
 
                 <div className="w-full h-full relative z-10">
-                  <FloorPlanCanvas 
+                  <RoomExtrusionCanvas 
                     layoutData={layoutData} 
                     activeFloor={activeFloor} 
                     imageUrl={uploadedImageUrl} 

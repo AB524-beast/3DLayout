@@ -1,150 +1,168 @@
 import cv2
 import numpy as np
-import open3d as o3d
 from scipy import ndimage
 from skimage.feature import peak_local_max
 from typing import List, Dict, Any
+
 
 class BlueprintWatershedPipeline:
     def __init__(self, target_canvas_dimension: float = 14.0):
         self.target_dim = target_canvas_dimension
 
-    def _generate_box_walls(self, cx: float, cy: float, width: float, height: float) -> List[Dict[str, float]]:
-        x1, x2 = cx - (width / 2.0), cx + (width / 2.0)
-        y1, y2 = cy - (height / 2.0), cy + (height / 2.0)
-        return [
-            {"x1": x1, "y1": y1, "x2": x2, "y2": y1},
-            {"x1": x2, "y1": y1, "x2": x2, "y2": y2},
-            {"x1": x2, "y1": y2, "x2": x1, "y2": y2},
-            {"x1": x1, "y1": y2, "x2": x1, "y2": y1}
-        ]
+    def _polygon_to_walls(self, pts_m):
+        walls = []
+        n = len(pts_m)
+        for i in range(n):
+            x1, y1 = pts_m[i]
+            x2, y2 = pts_m[(i + 1) % n]
+            walls.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        return walls
 
-    def extract_orthogonal_layout(self, image_bytes: bytes) -> List[Dict[str, Any]]:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            return []
-
-        h, w = img.shape
-        rooms_output = []
-
-        # Match FloorPlanCanvas.js exactly: planeHeight is fixed to target_dim
-        # and planeWidth = target_dim * aspect, so pixel->meter conversion must
-        # be based on image HEIGHT, not the max dimension.
-        px_to_meter = float(h) / self.target_dim
-
-        # 1. Binarize and invert (Walls = White, Empty Space = Black)
-        _, binary = cv2.threshold(img, 200, 255, cv2.THRESH_BINARY_INV)
-
-        # 2. Thicken the walls aggressively to swallow text, icons, and gaps
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        thick_walls = cv2.dilate(binary, kernel, iterations=3)
-
-        # 3. Calculate Distance Transform on the EMPTY space
-        empty_space = cv2.bitwise_not(thick_walls)
+    def _watershed_from_mask(self, wall_mask: np.ndarray, img: np.ndarray,
+                              w: int, h: int, px_to_meter: float) -> List[Dict[str, Any]]:
+        rooms = []
+        empty_space = cv2.bitwise_not(wall_mask)
         distance_map = cv2.distanceTransform(empty_space, cv2.DIST_L2, 5)
 
-        # 4. Find the absolute centers of the rooms (local maxima in the distance map).
-        # min_distance is scaled to the image size (rather than a fixed 20px) and
-        # a minimum distance-value threshold is enforced so small nooks created by
-        # furniture icons, dashed lines, or a printed grid don't each spawn their
-        # own basin — this was previously causing real blueprints to be shredded
-        # into dozens of tiny fragments instead of whole rooms.
-        min_dist_px = max(20, int(min(w, h) * 0.05))
+        min_dist_px = max(12, int(min(w, h) * 0.03))
         local_max_coords = peak_local_max(
             distance_map,
             min_distance=min_dist_px,
             labels=empty_space,
-            threshold_abs=min_dist_px * 0.6
+            threshold_abs=min_dist_px * 0.3,
+            exclude_border=3
         )
+
+        if len(local_max_coords) < 1:
+            return rooms
+
         local_max_mask = np.zeros(distance_map.shape, dtype=bool)
-        if len(local_max_coords) > 0:
-            local_max_mask[tuple(local_max_coords.T)] = True
+        local_max_mask[tuple(local_max_coords.T)] = True
 
-        # 5. Create markers for the Watershed algorithm
         markers, num_features = ndimage.label(local_max_mask)
+        if num_features < 1:
+            return rooms
 
-        # 6. Apply Watershed to segment the image into distinct room basins
-        img_color = cv2.cvtColor(thick_walls, cv2.COLOR_GRAY2BGR)
+        img_color = cv2.cvtColor(wall_mask, cv2.COLOR_GRAY2BGR)
         labels = cv2.watershed(img_color, np.int32(markers))
 
-        # 7. Extract the bounding geometries of each flooded room
-        for label_idx in range(1, num_features + 1):  # Skip 0 (background) and -1 (borders)
+        for label_idx in range(1, num_features + 1):
             mask = np.zeros_like(img, dtype=np.uint8)
             mask[labels == label_idx] = 255
 
-            x_px, y_px, w_px, h_px = cv2.boundingRect(mask)
+            mask_smooth = cv2.GaussianBlur(mask, (3, 3), 0)
+            _, mask_thresh = cv2.threshold(mask_smooth, 127, 255, 0)
+            room_contours, _ = cv2.findContours(mask_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            area = w_px * h_px
-            if area < (w * h * 0.02) or area > (w * h * 0.85):
+            if not room_contours:
                 continue
 
-            cx = ((x_px + (w_px / 2.0)) - (w / 2.0)) / px_to_meter
-            cy = ((y_px + (h_px / 2.0)) - (h / 2.0)) / px_to_meter
-            rw = w_px / px_to_meter
-            rh = h_px / px_to_meter
-
-            # Discard fragments too small to plausibly be a real room (roughly
-            # under 6 sq. meters / ~65 sq. ft) — this is what filters out
-            # bathroom-fixture nooks and hallway slivers.
-            if rw < 1.8 or rh < 1.8 or (rw * rh) < 5.5:
+            cnt = room_contours[0]
+            area_px = cv2.contourArea(cnt)
+            if area_px < (w * h * 0.003) or area_px > (w * h * 0.85):
                 continue
 
-            if rw <= self.target_dim * (w / h) and rh <= self.target_dim:
-                rooms_output.append({
-                    "label": f"Parsed Space {len(rooms_output) + 1}",
-                    "dimensions": f"{rw:.1f}m x {rh:.1f}m",
-                    "centerX": float(cx),
-                    "centerY": float(cy),
-                    "elevationZ": 0.0,
-                    "isOpenSpace": False,
-                    "walls": self._generate_box_walls(cx, cy, rw, rh),
-                    "area": round(rw * rh, 2)
-                })
+            epsilon = 0.02 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
 
-        # 8. Open3D Point Cloud Fallback
-        if not rooms_output:
-            try:
-                y_indices, x_indices = np.where(thick_walls > 0)
-                if len(x_indices) > 0:
-                    x_norm = (x_indices - (w / 2.0)) / px_to_meter
-                    y_norm = (y_indices - (h / 2.0)) / px_to_meter
-                    pts = np.zeros((len(x_norm), 3))
-                    pts[:, 0] = x_norm
-                    pts[:, 2] = y_norm
+            if len(approx) < 3:
+                continue
 
-                    pcd = o3d.geometry.PointCloud()
-                    pcd.points = o3d.utility.Vector3dVector(pts)
-                    obb = pcd.get_axis_aligned_bounding_box()
+            pts_m = []
+            for point in approx:
+                px, py = point[0]
+                mx = (px - w / 2.0) / px_to_meter
+                my = (py - h / 2.0) / px_to_meter
+                pts_m.append([float(mx), float(my)])
 
-                    cx, cz = float(obb.get_center()[0]), float(obb.get_center()[2])
-                    extent = obb.get_extent()
-                    rw, rh = float(extent[0]), float(extent[2])
+            xs = [p[0] for p in pts_m]
+            ys = [p[1] for p in pts_m]
+            bb_w = max(xs) - min(xs)
+            bb_h = max(ys) - min(ys)
 
-                    rooms_output.append({
-                        "label": "Global Structural Layout (O3D)",
-                        "dimensions": f"{rw:.1f}m x {rh:.1f}m",
-                        "centerX": cx,
-                        "centerY": cz,
-                        "elevationZ": 0.0,
-                        "isOpenSpace": False,
-                        "walls": self._generate_box_walls(cx, cz, rw, rh),
-                        "area": round(rw * rh, 2)
-                    })
-            except Exception:
-                pass
+            if bb_w < 0.3 or bb_h < 0.3 or bb_w > 18.0 or bb_h > 18.0:
+                continue
 
-        # 9. Guaranteed Emergency Fallback
-        if not rooms_output:
-             rooms_output.append({
-                "label": "Default Zone",
-                "dimensions": "6.0m x 6.0m",
-                "centerX": 0.0,
-                "centerY": 0.0,
+            rooms.append({
+                "label": f"Parsed Space {len(rooms) + 1}",
+                "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
+                "centerX": float(sum(xs) / len(xs)),
+                "centerY": float(sum(ys) / len(ys)),
                 "elevationZ": 0.0,
                 "isOpenSpace": False,
-                "walls": self._generate_box_walls(0.0, 0.0, 6.0, 6.0),
-                "area": 36.0
+                "walls": self._polygon_to_walls(pts_m),
+                "area": round(bb_w * bb_h, 2)
             })
 
-        return rooms_output
+        return rooms
+
+    def extract_orthogonal_layout(self, image_bytes: bytes) -> List[Dict[str, Any]]:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_color is None:
+            return []
+
+        h, w = img_color.shape[:2]
+        px_to_meter = float(h) / self.target_dim
+
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        hsv = cv2.cvtColor(img_color, cv2.COLOR_BGR2HSV)
+        _, _, value = cv2.split(hsv)
+        enhanced_hsv = clahe.apply(value)
+
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+        blurred_hsv = cv2.GaussianBlur(enhanced_hsv, (5, 5), 0)
+        kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+        candidates = []
+
+        # Strategy W1: Otsu threshold wall mask
+        def w_otsu():
+            _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel3, iterations=2)
+        candidates.append(self._watershed_from_mask(w_otsu(), img_color, w, h, px_to_meter))
+
+        # Strategy W2: Otsu on HSV value
+        def w_otsu_hsv():
+            _, binary = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel3, iterations=2)
+        candidates.append(self._watershed_from_mask(w_otsu_hsv(), img_color, w, h, px_to_meter))
+
+        # Strategy W3: Adaptive threshold
+        def w_adaptive():
+            binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY_INV, 15, 4)
+            return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel3, iterations=1)
+        candidates.append(self._watershed_from_mask(w_adaptive(), img_color, w, h, px_to_meter))
+
+        # Strategy W4: Canny edge wall mask
+        def w_canny():
+            med = np.median(blurred)
+            lower = int(max(0, 0.3 * med))
+            upper = int(min(255, 1.2 * med))
+            edges = cv2.Canny(blurred, lower, upper, apertureSize=3)
+            return cv2.dilate(edges, kernel3, iterations=2)
+        candidates.append(self._watershed_from_mask(w_canny(), img_color, w, h, px_to_meter))
+
+        # Pick best candidate
+        best_rooms = []
+        best_score = -1
+        for rooms in candidates:
+            if not rooms:
+                continue
+            n = len(rooms)
+            areas = [r["area"] for r in rooms]
+            mean_area = sum(areas) / n
+            score = min(n, 20) * 10
+            if 0.5 < mean_area < 80:
+                score += 20
+            if n >= 2:
+                score += 5
+            if score > best_score:
+                best_score = score
+                best_rooms = rooms
+
+        return best_rooms

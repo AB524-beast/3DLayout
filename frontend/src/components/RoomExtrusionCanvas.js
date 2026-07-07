@@ -1,18 +1,39 @@
 "use client";
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-export default function FloorPlanCanvas({ layoutData, activeFloor = 0, imageUrl = "" }) {
+/**
+ * Renders walls by tracing each room's polygon edges (layoutData.rooms[*].walls)
+ * and projecting them into 3D as vertical extrusions.
+ */
+export default function RoomExtrusionCanvas({
+  layoutData,
+  activeFloor = 0,
+  imageUrl = "",
+}) {
   const containerRef = useRef(null);
+
+  const rooms = layoutData?.rooms || [];
+  const totalFloors = layoutData?.totalFloors || 1;
+
+  const floorFilter = useMemo(() => {
+    return (room) => {
+      if (totalFloors > 1) {
+        const roomLevel = Math.round((room.elevationZ || 0) / 3.0);
+        return roomLevel === activeFloor;
+      }
+      return true;
+    };
+  }, [activeFloor, totalFloors]);
 
   useEffect(() => {
     if (!containerRef.current || !layoutData || !layoutData.rooms) return;
 
     const width = containerRef.current.clientWidth;
     const height = containerRef.current.clientHeight;
-    
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x060608);
 
@@ -33,34 +54,32 @@ export default function FloorPlanCanvas({ layoutData, activeFloor = 0, imageUrl 
     scene.add(dirLight);
 
     const grid = new THREE.GridHelper(30, 30, 0x3b82f6, 0x1e293b);
-    grid.position.y = 0.001; 
+    grid.position.y = 0.001;
     scene.add(grid);
 
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.2 }); 
+    const wallHeight = 2.4;
+    const wallThickness = 0.15;
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.2 });
     const openMat = new THREE.MeshStandardMaterial({ color: 0x10b981, transparent: true, opacity: 0.35 });
 
-    const renderWalls = () => {
-      layoutData.rooms.forEach((room) => {
-        const roomLevel = Math.round(room.elevationZ / 3.0);
-        if (layoutData.totalFloors > 1 && roomLevel !== activeFloor) return;
+    const addWalls = () => {
+      rooms.filter(floorFilter).forEach((room) => {
+        const baseZ = room.elevationZ || 0;
 
-        const wallHeight = 2.4;
-        const baseZ = room.elevationZ;
-
-        room.walls.forEach((wall) => {
+        (room.walls || []).forEach((wall) => {
           const dx = wall.x2 - wall.x1;
           const dy = wall.y2 - wall.y1;
           const length = Math.hypot(dx, dy);
-          
           if (length < 0.02) return;
 
-          const geo = new THREE.BoxGeometry(length, wallHeight, 0.15);
+          // Trace edge as a vertical box (extrusion)
+          const geo = new THREE.BoxGeometry(length, wallHeight, wallThickness);
           const mesh = new THREE.Mesh(geo, room.isOpenSpace ? openMat : wallMat);
 
           const cx = (wall.x1 + wall.x2) / 2;
           const cy = (wall.y1 + wall.y2) / 2;
 
-          mesh.position.set(cx, (wallHeight / 2) + baseZ, cy);
+          mesh.position.set(cx, wallHeight / 2 + baseZ, cy);
           mesh.rotation.y = -Math.atan2(dy, dx);
 
           scene.add(mesh);
@@ -68,33 +87,39 @@ export default function FloorPlanCanvas({ layoutData, activeFloor = 0, imageUrl 
       });
     };
 
-    if (imageUrl) {
+    const renderBlueprint = () => {
+      if (!imageUrl) {
+        addWalls();
+        return;
+      }
+
       const textureLoader = new THREE.TextureLoader();
       textureLoader.load(imageUrl, (texture) => {
         const img = texture.image;
         const aspect = img.width / img.height;
-        
-        const planeHeight = 14.0; 
+
+        // Mirror existing behavior of FloorPlanCanvas
+        const planeHeight = 14.0;
         const planeWidth = planeHeight * aspect;
 
-        const planeGeo = new THREE.PlaneGeometry(planeWidth, planeHeight); 
+        const planeGeo = new THREE.PlaneGeometry(planeWidth, planeHeight);
         const planeMat = new THREE.MeshBasicMaterial({
           map: texture,
           side: THREE.DoubleSide,
           transparent: true,
-          opacity: 0.85
+          opacity: 0.85,
         });
-        
+
         const blueprintMesh = new THREE.Mesh(planeGeo, planeMat);
         blueprintMesh.rotation.x = -Math.PI / 2;
         blueprintMesh.position.set(0, 0, 0);
         scene.add(blueprintMesh);
 
-        renderWalls();
+        addWalls();
       });
-    } else {
-      renderWalls();
-    }
+    };
+
+    renderBlueprint();
 
     let frameId;
     const animate = () => {
@@ -120,7 +145,8 @@ export default function FloorPlanCanvas({ layoutData, activeFloor = 0, imageUrl 
       controls.dispose();
       renderer.dispose();
     };
-  }, [layoutData, activeFloor, imageUrl]);
+  }, [layoutData, activeFloor, imageUrl, rooms, floorFilter]);
 
   return <div ref={containerRef} className="w-full h-full min-h-[500px]" />;
 }
+

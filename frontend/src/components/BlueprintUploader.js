@@ -14,13 +14,14 @@ export default function BlueprintUploader({ onUploadSuccess }) {
   const [numRooms, setNumRooms] = useState(4);
   const [roomsConfig, setRoomsConfig] = useState([]);
 
-  const BACKEND_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000") + "/api/v1/process-layout";
+  const BACKEND_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000" ) + "/api/v1/process-layout";
 
   const initializeWizardStepTwo = () => {
-    const baselineRoomSize = Math.floor((targetSqFt * 0.75) / numRooms); 
+    const baselineRoomSize = Math.floor((targetSqFt * 0.75) / numRooms);
+    const roomsPerFloor = Math.ceil(numRooms / numFloors);
     const initialRooms = Array.from({ length: numRooms }).map((_, idx) => ({
       name: idx === 0 ? "Living Room" : idx === 1 ? "Bedroom" : `Room ${idx + 1}`,
-      floorAssigned: 1,
+      floorAssigned: Math.min(Math.floor(idx / roomsPerFloor) + 1, numFloors),
       isOpenSpace: false,
       roomSqFt: baselineRoomSize
     }));
@@ -93,7 +94,7 @@ export default function BlueprintUploader({ onUploadSuccess }) {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`${BACKEND_URL}/image?floors=${numFloors}`, {
+      const response = await fetch(`${BACKEND_URL}/image?floors=${numFloors}&method=auto`, {
         method: 'POST',
         body: formData,
       });
@@ -166,12 +167,24 @@ export default function BlueprintUploader({ onUploadSuccess }) {
             </div>
           ) : (
             <form onSubmit={handleManualSubmit} className="space-y-4">
+              <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider px-1 flex items-center justify-between">
+                <span>Room Name</span>
+                <div className="flex gap-4">
+                  <span className="w-16 text-right">Sq.Ft.</span>
+                  <span className="w-12 text-center">Floor</span>
+                </div>
+              </div>
               <div className="max-h-56 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
                 {roomsConfig.map((room, index) => (
                   <div key={index} className="p-3 bg-gray-900 border border-gray-800 rounded-xl space-y-2">
-                    <div className="grid grid-cols-12 gap-2">
+                    <div className="grid grid-cols-12 gap-2 items-center">
                       <input type="text" value={room.name} onChange={(e) => updateRoomProperty(index, "name", e.target.value)} className="col-span-6 bg-gray-950 border border-gray-800 rounded-lg p-1.5 text-xs text-white" required />
-                      <input type="number" value={room.roomSqFt} onChange={(e) => updateRoomProperty(index, "roomSqFt", parseInt(e.target.value) || 0)} className="col-span-6 bg-gray-950 border border-gray-800 rounded-lg p-1.5 text-xs text-white" required />
+                      <input type="number" value={room.roomSqFt} onChange={(e) => updateRoomProperty(index, "roomSqFt", parseInt(e.target.value) || 0)} className="col-span-3 bg-gray-950 border border-gray-800 rounded-lg p-1.5 text-xs text-white text-right" required />
+                      <select value={room.floorAssigned} onChange={(e) => updateRoomProperty(index, "floorAssigned", parseInt(e.target.value))} className="col-span-3 bg-gray-950 border border-gray-800 rounded-lg p-1.5 text-xs text-white text-center">
+                        {Array.from({ length: numFloors }).map((_, fIdx) => (
+                          <option key={fIdx + 1} value={fIdx + 1}>Lvl {fIdx + 1}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                 ))}
