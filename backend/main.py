@@ -6,6 +6,8 @@ from typing import List, Dict, Any
 import numpy as np
 import cv2
 import math
+import json
+import os
 
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
 
@@ -59,6 +61,24 @@ def _remove_noise(binary: np.ndarray) -> np.ndarray:
     return result
 
 
+def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
+    n = len(pts)
+    snapped = pts.copy().astype(np.float64)
+    for i in range(n):
+        p1 = snapped[i]
+        p2 = snapped[(i + 1) % n]
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        if max(abs(dx), abs(dy)) < 0.5:
+            continue
+        angle = abs(math.degrees(math.atan2(abs(dy), abs(dx))))
+        if angle < tol_deg:
+            snapped[(i + 1) % n][1] = p1[1]
+        elif angle > 90.0 - tol_deg:
+            snapped[(i + 1) % n][0] = p1[0]
+    return snapped.astype(np.int32)
+
+
 def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: float,
                                 min_rel_area: float = 0.002, max_rel_area: float = 0.80,
                                 min_dim_m: float = 0.3, max_dim_m: float = 18.0,
@@ -87,6 +107,13 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
                 p = hierarchy[p][3]
             depths[i] = d
 
+    canny_edges = None
+    if gray is not None:
+        med = np.median(gray)
+        low = int(max(0, 0.3 * med))
+        high = int(min(255, 1.2 * med))
+        canny_edges = cv2.Canny(gray, low, high, apertureSize=3)
+
     for idx, cnt in enumerate(contours):
         if use_hierarchy:
             parent = hierarchy[idx][3]
@@ -108,8 +135,15 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
             mask = np.zeros(binary.shape, dtype=np.uint8)
             cv2.drawContours(mask, [cnt], -1, 255, -1)
             interior = gray[mask == 255]
-            if len(interior) > 0 and np.std(interior) > 55:
-                continue
+            if len(interior) > 0:
+                if np.std(interior) > 55:
+                    continue
+                if canny_edges is not None:
+                    interior_edges = canny_edges[mask == 255]
+                    if len(interior_edges) > 0:
+                        edge_density = np.sum(interior_edges > 0) / len(interior_edges)
+                        if edge_density > 0.08:
+                            continue
 
         peri = cv2.arcLength(cnt, True)
         if peri <= 0:
@@ -123,13 +157,15 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
         if solidity < 0.45:
             continue
 
-        epsilon = 0.02 * peri
+        epsilon = 0.01 * peri
         approx = cv2.approxPolyDP(cnt, epsilon, True)
 
         if len(approx) < 4:
             continue
-        if len(approx) > 10:
-            continue
+
+        approx_pts = approx.reshape(-1, 2)
+        snapped = _snap_orthogonal(approx_pts)
+        approx = snapped.reshape(-1, 1, 2)
 
         pts_m = []
         for point in approx:
@@ -170,7 +206,8 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
     return rooms
 
 
-def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float, gray: np.ndarray = None, **kwargs) -> List[Dict[str, Any]]:
+def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float,
+                  gray: np.ndarray = None, **kwargs) -> List[Dict[str, Any]]:
     try:
         binary = binary_fn()
         if binary is None or np.max(binary) == 0:
@@ -202,42 +239,28 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
     blurred_hsv = cv2.GaussianBlur(enhanced_hsv, (5, 5), 0)
 
-    bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
-    blurred_bilat = cv2.GaussianBlur(bilateral, (5, 5), 0)
-
     candidates = []
 
     def _close(b, iters=2):
         return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=iters)
 
-    # 1. Otsu on CLAHE grayscale
     def strat_otsu_gray():
         _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         return _close(b, 2)
     candidates.append(_try_strategy(strat_otsu_gray, w, h, px_to_meter, gray=gray))
 
-    # 2. Otsu on HSV value channel
     def strat_otsu_hsv():
         _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         return _close(b, 2)
     candidates.append(_try_strategy(strat_otsu_hsv, w, h, px_to_meter, gray=gray))
 
-    # 3. Adaptive small window
-    def strat_adaptive_small():
+    def strat_adaptive():
         b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY_INV, 11, 3)
-        return _close(b, 1)
-    candidates.append(_try_strategy(strat_adaptive_small, w, h, px_to_meter,
+                                  cv2.THRESH_BINARY_INV, 15, 4)
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_adaptive, w, h, px_to_meter,
                                     gray=gray, min_rel_area=0.002, min_dim_m=0.25))
 
-    # 4. Adaptive large window
-    def strat_adaptive_large():
-        b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY_INV, 25, 6)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_adaptive_large, w, h, px_to_meter, gray=gray))
-
-    # 5. Canny edge based (finds rooms as white regions bounded by black edges)
     def strat_canny():
         med = np.median(blurred)
         lower = int(max(0, 0.3 * med))
@@ -247,33 +270,6 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
         return cv2.bitwise_not(dilated)
     candidates.append(_try_strategy(strat_canny, w, h, px_to_meter,
                                     gray=gray, use_hierarchy=False))
-
-    # 6. Triangle threshold on grayscale (good for unimodal histograms)
-    def strat_triangle_gray():
-        _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_TRIANGLE)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_triangle_gray, w, h, px_to_meter, gray=gray))
-
-    # 7. Triangle threshold on HSV value
-    def strat_triangle_hsv():
-        _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_TRIANGLE)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_triangle_hsv, w, h, px_to_meter, gray=gray))
-
-    # 8. Bilateral filter + Otsu (edge-preserving smoothing)
-    def strat_bilateral_otsu():
-        _, b = cv2.threshold(blurred_bilat, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_bilateral_otsu, w, h, px_to_meter, gray=gray))
-
-    # 9. Otsu on grayscale of original (no CLAHE) — for already high-contrast plans
-    raw_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-    blurred_raw = cv2.GaussianBlur(raw_gray, (5, 5), 0)
-
-    def strat_otsu_raw():
-        _, b = cv2.threshold(blurred_raw, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_otsu_raw, w, h, px_to_meter, gray=blurred_raw))
 
     best_rooms = []
     best_score = -1
@@ -336,6 +332,49 @@ class JSONRoom(BaseModel):
     width: float
     height: float
     polygon_points: List[List[float]]
+
+
+@app.get("/api/v1/process-layout/sample")
+async def process_layout_sample(floors: int = Query(1)):
+    json_path = os.path.join(os.path.dirname(__file__), "blueprint_rooms.json")
+    if not os.path.exists(json_path):
+        raise HTTPException(status_code=404, detail="Sample layout file not found.")
+    with open(json_path) as f:
+        raw = json.load(f)
+
+    all_xs = [p[0] for r in raw["rooms"] for p in r["polygon_points"]]
+    all_ys = [p[1] for r in raw["rooms"] for p in r["polygon_points"]]
+    img_w = max(all_xs) - min(all_xs) + 200
+    img_h = max(all_ys) - min(all_ys) + 200
+    px_to_meter = img_h / 14.0
+    cx = (min(all_xs) + max(all_xs)) / 2.0
+    cy = (min(all_ys) + max(all_ys)) / 2.0
+
+    rooms_out = []
+    for r in raw["rooms"]:
+        pts_m = [[(px - cx) / px_to_meter, (py - cy) / px_to_meter] for px, py in r["polygon_points"]]
+        xs = [p[0] for p in pts_m]
+        ys = [p[1] for p in pts_m]
+        bb_w = max(xs) - min(xs)
+        bb_h = max(ys) - min(ys)
+        floors_out = []
+        for i in range(len(pts_m)):
+            x1, y1 = pts_m[i]
+            x2, y2 = pts_m[(i + 1) % len(pts_m)]
+            floors_out.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+
+        rooms_out.append({
+            "label": r["label"],
+            "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
+            "centerX": sum(xs) / len(xs),
+            "centerY": sum(ys) / len(ys),
+            "elevationZ": 0.0,
+            "isOpenSpace": False,
+            "walls": floors_out,
+            "area": round(bb_w * bb_h, 2),
+        })
+
+    return build_response(rooms_out, floors)
 
 
 @app.post("/api/v1/process-layout/image")
