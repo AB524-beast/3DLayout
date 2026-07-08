@@ -6,18 +6,6 @@ from typing import List, Dict, Any
 import numpy as np
 import cv2
 import math
-import json
-import os
-
-try:
-    from pipeline import BlueprintWatershedPipeline
-except ModuleNotFoundError:
-    from backend.pipeline import BlueprintWatershedPipeline
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SAMPLE_ROOMS_PATH = os.path.join(BASE_DIR, "blueprint_rooms.json")
-
-watershed_pipeline = BlueprintWatershedPipeline()
 
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
 
@@ -29,26 +17,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class RoomSpecification(BaseModel):
     name: str
     floorAssigned: int
     isOpenSpace: bool
     roomSqFt: float
 
+
 class ProceduralGenerationPayload(BaseModel):
     total_sq_ft: float
     total_floors: int
     rooms: List[RoomSpecification]
 
-def generate_box_walls(cx: float, cy: float, width: float, height: float) -> List[Dict[str, float]]:
-    x1, x2 = cx - (width / 2.0), cx + (width / 2.0)
-    y1, y2 = cy - (height / 2.0), cy + (height / 2.0)
-    return [
-        {"x1": x1, "y1": y1, "x2": x2, "y2": y1},
-        {"x1": x2, "y1": y1, "x2": x2, "y2": y2},
-        {"x1": x2, "y1": y2, "x2": x1, "y2": y2},
-        {"x1": x1, "y1": y2, "x2": x1, "y2": y1}
-    ]
 
 def polygon_to_walls(points_m: List[List[float]]) -> List[Dict[str, float]]:
     walls = []
@@ -59,10 +40,30 @@ def polygon_to_walls(points_m: List[List[float]]) -> List[Dict[str, float]]:
         walls.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
     return walls
 
+
+def _remove_noise(binary: np.ndarray) -> np.ndarray:
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    if num_labels < 3:
+        return opened
+    areas = [(stats[i, cv2.CC_STAT_AREA], i) for i in range(1, num_labels)]
+    areas.sort(reverse=True)
+    largest = areas[0][0]
+    keep = {i for a, i in areas if a >= largest * 0.02}
+    result = np.zeros_like(opened)
+    for i in keep:
+        result[labels == i] = 255
+    if np.max(result) == 0:
+        return binary
+    return result
+
+
 def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: float,
                                 min_rel_area: float = 0.002, max_rel_area: float = 0.80,
                                 min_dim_m: float = 0.3, max_dim_m: float = 18.0,
-                                use_hierarchy: bool = True, invert_parent: bool = True) -> List[Dict[str, Any]]:
+                                use_hierarchy: bool = True, invert_parent: bool = True,
+                                gray: np.ndarray = None) -> List[Dict[str, Any]]:
     rooms = []
     method = cv2.RETR_TREE if use_hierarchy else cv2.RETR_EXTERNAL
     contours, hierarchy = cv2.findContours(binary, method, cv2.CHAIN_APPROX_SIMPLE)
@@ -75,6 +76,17 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
     if use_hierarchy:
         hierarchy = hierarchy[0]
 
+    if use_hierarchy:
+        contour_areas = np.array([cv2.contourArea(c) for c in contours])
+        depths = np.zeros(len(contours), dtype=np.int32)
+        for i in range(len(contours)):
+            p = hierarchy[i][3]
+            d = 0
+            while p != -1:
+                d += 1
+                p = hierarchy[p][3]
+            depths[i] = d
+
     for idx, cnt in enumerate(contours):
         if use_hierarchy:
             parent = hierarchy[idx][3]
@@ -82,10 +94,22 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
                 continue
             if not invert_parent and parent != -1:
                 continue
+            if invert_parent and depths[idx] >= 2:
+                child_area = contour_areas[idx]
+                parent_area = contour_areas[parent]
+                if parent_area <= 0 or child_area < parent_area * 0.08:
+                    continue
 
         area_px = cv2.contourArea(cnt)
         if area_px < (w * h * min_rel_area) or area_px > (w * h * max_rel_area):
             continue
+
+        if gray is not None and area_px >= 500:
+            mask = np.zeros(binary.shape, dtype=np.uint8)
+            cv2.drawContours(mask, [cnt], -1, 255, -1)
+            interior = gray[mask == 255]
+            if len(interior) > 0 and np.std(interior) > 55:
+                continue
 
         peri = cv2.arcLength(cnt, True)
         if peri <= 0:
@@ -103,6 +127,8 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
         approx = cv2.approxPolyDP(cnt, epsilon, True)
 
         if len(approx) < 4:
+            continue
+        if len(approx) > 10:
             continue
 
         pts_m = []
@@ -122,7 +148,12 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
 
         min_side = min(bb_w, bb_h)
         max_side = max(bb_w, bb_h)
-        if max_side > 0 and min_side / max_side < 0.06:
+        if max_side > 0 and min_side / max_side < 0.10:
+            continue
+
+        peri_m = peri / px_to_meter
+        perim_rect = 2.0 * (bb_w + bb_h)
+        if perim_rect > 0 and peri_m / perim_rect > 2.0:
             continue
 
         rooms.append({
@@ -133,31 +164,21 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
             "elevationZ": 0.0,
             "isOpenSpace": False,
             "walls": polygon_to_walls(pts_m),
-            "area": round(bb_w * bb_h, 2)
+            "area": round(bb_w * bb_h, 2),
         })
 
     return rooms
 
 
-def _try_strategy(binary_fn, label: str, w: int, h: int, px_to_meter: float, **kwargs) -> List[Dict[str, Any]]:
+def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float, gray: np.ndarray = None, **kwargs) -> List[Dict[str, Any]]:
     try:
         binary = binary_fn()
         if binary is None or np.max(binary) == 0:
             return []
-        rooms = _extract_rooms_from_binary(binary, w, h, px_to_meter, **kwargs)
-        return rooms
+        binary = _remove_noise(binary)
+        return _extract_rooms_from_binary(binary, w, h, px_to_meter, gray=gray, **kwargs)
     except Exception:
         return []
-
-
-def _floodfill_interior(binary: np.ndarray) -> np.ndarray:
-    inv = cv2.bitwise_not(binary)
-    hh, ww = inv.shape
-    mask = np.zeros((hh + 2, ww + 2), np.uint8)
-    for sx, sy in [(0, 0), (ww - 1, 0), (0, hh - 1), (ww - 1, hh - 1),
-                    (ww // 2, 0), (ww // 2, hh - 1), (0, hh // 2), (ww - 1, hh // 2)]:
-        cv2.floodFill(inv, mask, (sx, sy), 0)
-    return inv
 
 
 def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
@@ -178,87 +199,81 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     enhanced_hsv = clahe.apply(value)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    kernel5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
     blurred_hsv = cv2.GaussianBlur(enhanced_hsv, (5, 5), 0)
 
+    bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+    blurred_bilat = cv2.GaussianBlur(bilateral, (5, 5), 0)
+
     candidates = []
 
-    # A: Otsu on CLAHE grayscale — hierarchy interior rooms
-    def otsu_gray():
+    def _close(b, iters=2):
+        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=iters)
+
+    # 1. Otsu on CLAHE grayscale
+    def strat_otsu_gray():
         _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=2)
-    candidates.append(_try_strategy(otsu_gray, "otsu_gray", w, h, px_to_meter))
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_otsu_gray, w, h, px_to_meter, gray=gray))
 
-    # B: Otsu on HSV value channel
-    def otsu_hsv():
+    # 2. Otsu on HSV value channel
+    def strat_otsu_hsv():
         _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=2)
-    candidates.append(_try_strategy(otsu_hsv, "otsu_hsv", w, h, px_to_meter))
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_otsu_hsv, w, h, px_to_meter, gray=gray))
 
-    # C: Adaptive small block
-    def adaptive_small():
+    # 3. Adaptive small window
+    def strat_adaptive_small():
         b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY_INV, 11, 3)
-        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=1)
-    candidates.append(_try_strategy(adaptive_small, "adaptive_small", w, h, px_to_meter,
-                                    min_rel_area=0.002, min_dim_m=0.25))
+        return _close(b, 1)
+    candidates.append(_try_strategy(strat_adaptive_small, w, h, px_to_meter,
+                                    gray=gray, min_rel_area=0.002, min_dim_m=0.25))
 
-    # D: Adaptive large block
-    def adaptive_large():
+    # 4. Adaptive large window
+    def strat_adaptive_large():
         b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY_INV, 25, 6)
-        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=2)
-    candidates.append(_try_strategy(adaptive_large, "adaptive_large", w, h, px_to_meter))
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_adaptive_large, w, h, px_to_meter, gray=gray))
 
-    # E: Canny interior via hierarchy
-    def canny_interior():
+    # 5. Canny edge based (finds rooms as white regions bounded by black edges)
+    def strat_canny():
         med = np.median(blurred)
         lower = int(max(0, 0.3 * med))
         upper = int(min(255, 1.2 * med))
         edges = cv2.Canny(blurred, lower, upper, apertureSize=3)
         dilated = cv2.dilate(edges, kernel, iterations=3)
         return cv2.bitwise_not(dilated)
-    candidates.append(_try_strategy(canny_interior, "canny_interior", w, h, px_to_meter,
-                                    invert_parent=True))
+    candidates.append(_try_strategy(strat_canny, w, h, px_to_meter,
+                                    gray=gray, use_hierarchy=False))
 
-    # F: Canny external (open plans)
-    def canny_external():
-        med = np.median(blurred)
-        lower = int(max(0, 0.3 * med))
-        upper = int(min(255, 1.2 * med))
-        edges = cv2.Canny(blurred, lower, upper, apertureSize=3)
-        dilated = cv2.dilate(edges, kernel, iterations=2)
-        empty = cv2.bitwise_not(dilated)
-        return cv2.morphologyEx(empty, cv2.MORPH_CLOSE, kernel5, iterations=2)
-    candidates.append(_try_strategy(canny_external, "canny_external", w, h, px_to_meter,
-                                    use_hierarchy=False, min_dim_m=0.5))
+    # 6. Triangle threshold on grayscale (good for unimodal histograms)
+    def strat_triangle_gray():
+        _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_TRIANGLE)
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_triangle_gray, w, h, px_to_meter, gray=gray))
 
-    # G: Otsu on mean-shift filtered image
-    def meanshift_otsu():
-        filtered = cv2.pyrMeanShiftFiltering(img_color, 15, 30)
-        gray_f = cv2.cvtColor(filtered, cv2.COLOR_BGR2GRAY)
-        blurred_f = cv2.GaussianBlur(gray_f, (5, 5), 0)
-        _, b = cv2.threshold(blurred_f, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=2)
-    candidates.append(_try_strategy(meanshift_otsu, "meanshift_otsu", w, h, px_to_meter))
+    # 7. Triangle threshold on HSV value
+    def strat_triangle_hsv():
+        _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_TRIANGLE)
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_triangle_hsv, w, h, px_to_meter, gray=gray))
 
-    # H: Otsu gray + flood-fill interior detection
-    def flood_otsu():
-        _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        closed = cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel5, iterations=3)
-        return _floodfill_interior(closed)
-    candidates.append(_try_strategy(flood_otsu, "flood_otsu", w, h, px_to_meter,
-                                    use_hierarchy=False, min_dim_m=0.3, min_rel_area=0.003))
+    # 8. Bilateral filter + Otsu (edge-preserving smoothing)
+    def strat_bilateral_otsu():
+        _, b = cv2.threshold(blurred_bilat, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_bilateral_otsu, w, h, px_to_meter, gray=gray))
 
-    # I: Otsu HSV + flood-fill interior detection
-    def flood_hsv():
-        _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        closed = cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel5, iterations=3)
-        return _floodfill_interior(closed)
-    candidates.append(_try_strategy(flood_hsv, "flood_hsv", w, h, px_to_meter,
-                                    use_hierarchy=False, min_dim_m=0.3, min_rel_area=0.003))
+    # 9. Otsu on grayscale of original (no CLAHE) — for already high-contrast plans
+    raw_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+    blurred_raw = cv2.GaussianBlur(raw_gray, (5, 5), 0)
+
+    def strat_otsu_raw():
+        _, b = cv2.threshold(blurred_raw, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return _close(b, 2)
+    candidates.append(_try_strategy(strat_otsu_raw, w, h, px_to_meter, gray=blurred_raw))
 
     best_rooms = []
     best_score = -1
@@ -305,177 +320,103 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     return best_rooms
 
 
-def simplify_polygon(points_px: List[List[float]], epsilon_ratio: float = 0.01) -> List[List[float]]:
-    pts = np.array(points_px, dtype=np.int32).reshape(-1, 1, 2)
-    perimeter = cv2.arcLength(pts, True)
-    epsilon = max(epsilon_ratio * perimeter, 1.0)
-    approx = cv2.approxPolyDP(pts, epsilon, True)
-    return approx.reshape(-1, 2).tolist()
+def build_response(rooms: List[Dict[str, Any]], floors: int) -> dict:
+    return {
+        "rooms": rooms,
+        "totalRooms": len(rooms),
+        "totalFloors": floors,
+        "calculatedSqFt": round(sum(r["area"] for r in rooms) * 10.764, 1),
+    }
 
-def polygon_area_px(points_px: List[List[float]]) -> float:
-    n = len(points_px)
-    if n < 3:
-        return 0.0
-    area = 0.0
-    for i in range(n):
-        x1, y1 = points_px[i]
-        x2, y2 = points_px[(i + 1) % n]
-        area += (x1 * y2) - (x2 * y1)
-    return abs(area) / 2.0
 
-def load_sample_rooms_from_cache(target_dim: float = 14.0) -> List[Dict[str, Any]]:
-    if not os.path.exists(SAMPLE_ROOMS_PATH):
-        return []
+class JSONRoom(BaseModel):
+    label: str
+    centerX: float
+    centerY: float
+    width: float
+    height: float
+    polygon_points: List[List[float]]
 
-    with open(SAMPLE_ROOMS_PATH, "r") as f:
-        cached = json.load(f)
 
-    raw_rooms = cached.get("rooms", [])
-    if not raw_rooms:
-        return []
+@app.post("/api/v1/process-layout/image")
+async def process_layout_image(file: UploadFile = File(...), floors: int = Query(1)):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Invalid format.")
+    try:
+        image_bytes = await file.read()
+        rooms = extract_walls_via_contours(image_bytes)
+        return build_response(rooms, floors)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    min_x = min(r["centerX"] - r["width"] / 2.0 for r in raw_rooms)
-    max_x = max(r["centerX"] + r["width"] / 2.0 for r in raw_rooms)
-    min_y = min(r["centerY"] - r["height"] / 2.0 for r in raw_rooms)
-    max_y = max(r["centerY"] + r["height"] / 2.0 for r in raw_rooms)
 
+@app.post("/api/v1/process-layout/json")
+async def process_layout_json(payload: List[JSONRoom], floors: int = Query(1)):
+    if not payload:
+        raise HTTPException(status_code=400, detail="No rooms provided.")
+    min_x = min(r.centerX - r.width / 2.0 for r in payload)
+    max_x = max(r.centerX + r.width / 2.0 for r in payload)
+    min_y = min(r.centerY - r.height / 2.0 for r in payload)
+    max_y = max(r.centerY + r.height / 2.0 for r in payload)
     canvas_w = max_x - min_x
     canvas_h = max_y - min_y
     canvas_cx = (min_x + max_x) / 2.0
     canvas_cy = (min_y + max_y) / 2.0
-
+    target_dim = 14.0
     px_to_meter = max(canvas_w, canvas_h) / target_dim
     if px_to_meter <= 0:
-        return []
+        raise HTTPException(status_code=400, detail="Invalid room dimensions.")
 
     rooms_output = []
-    for r in raw_rooms:
-        raw_points = r.get("polygon_points") or []
+    for r in payload:
+        raw_points = r.polygon_points
+        pts_m = [[(px - canvas_cx) / px_to_meter, (py - canvas_cy) / px_to_meter] for px, py in raw_points]
+        xs = [p[0] for p in pts_m]
+        ys = [p[1] for p in pts_m]
+        rw = max(xs) - min(xs)
+        rh = max(ys) - min(ys)
+        area_px = 0.0
+        n = len(raw_points)
+        for i in range(n):
+            x1, y1 = raw_points[i]
+            x2, y2 = raw_points[(i + 1) % n]
+            area_px += (x1 * y2) - (x2 * y1)
+        area_m2 = round(abs(area_px) / 2.0 / (px_to_meter ** 2), 2)
 
-        if len(raw_points) >= 3:
-            simplified_px = simplify_polygon(raw_points)
-            if len(simplified_px) < 3:
-                simplified_px = raw_points
+        rooms_output.append({
+            "label": r.label,
+            "dimensions": f"{rw:.1f}m x {rh:.1f}m",
+            "centerX": sum(xs) / len(xs),
+            "centerY": sum(ys) / len(ys),
+            "elevationZ": 0.0,
+            "isOpenSpace": False,
+            "walls": polygon_to_walls(pts_m),
+            "area": area_m2,
+        })
 
-            points_m = [
-                [(px - canvas_cx) / px_to_meter, (py - canvas_cy) / px_to_meter]
-                for px, py in simplified_px
-            ]
+    return build_response(rooms_output, floors)
 
-            area_px = polygon_area_px(simplified_px)
-            area_m2 = round(area_px / (px_to_meter ** 2), 2)
-
-            xs = [p[0] for p in points_m]
-            ys = [p[1] for p in points_m]
-            cx = sum(xs) / len(xs)
-            cy = sum(ys) / len(ys)
-            rw = max(xs) - min(xs)
-            rh = max(ys) - min(ys)
-
-            rooms_output.append({
-                "label": r.get("label", f"Room {len(rooms_output) + 1}"),
-                "dimensions": f"{rw:.1f}m x {rh:.1f}m",
-                "centerX": cx,
-                "centerY": cy,
-                "elevationZ": 0.0,
-                "isOpenSpace": False,
-                "walls": polygon_to_walls(points_m),
-                "area": area_m2
-            })
-        else:
-            cx = (r["centerX"] - canvas_cx) / px_to_meter
-            cy = (r["centerY"] - canvas_cy) / px_to_meter
-            rw = r["width"] / px_to_meter
-            rh = r["height"] / px_to_meter
-
-            rooms_output.append({
-                "label": r.get("label", f"Room {len(rooms_output) + 1}"),
-                "dimensions": f"{rw:.1f}m x {rh:.1f}m",
-                "centerX": cx,
-                "centerY": cy,
-                "elevationZ": 0.0,
-                "isOpenSpace": False,
-                "walls": generate_box_walls(cx, cy, rw, rh),
-                "area": round(rw * rh, 2)
-            })
-
-    return rooms_output
-
-@app.get("/api/v1/process-layout/sample")
-async def process_layout_sample(floors: int = Query(1)):
-    detected_rooms = load_sample_rooms_from_cache()
-    if not detected_rooms:
-        raise HTTPException(status_code=404, detail="No cached sample layout available.")
-
-    return {
-        "rooms": detected_rooms,
-        "totalRooms": len(detected_rooms),
-        "totalFloors": floors,
-        "calculatedSqFt": round(sum(r["area"] for r in detected_rooms) * 10.764, 1)
-    }
-
-@app.post("/api/v1/process-layout/image")
-async def process_layout_image(
-    file: UploadFile = File(...),
-    floors: int = Query(1),
-    method: str = Query("auto", description="auto | contour | watershed | json")
-):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Invalid architectural format stream.")
-    try:
-        image_bytes = await file.read()
-        detected_rooms: List[Dict[str, Any]] = []
-
-        if method == "json":
-            detected_rooms = load_sample_rooms_from_cache()
-        
-        if not detected_rooms and method in ("auto", "contour"):
-            detected_rooms = extract_walls_via_contours(image_bytes)
-
-        if not detected_rooms and (method == "watershed" or method == "auto"):
-            try:
-                watershed_rooms = watershed_pipeline.extract_orthogonal_layout(image_bytes)
-                if watershed_rooms:
-                    detected_rooms = watershed_rooms
-            except Exception:
-                pass
-
-        return {
-            "rooms": detected_rooms,
-            "totalRooms": len(detected_rooms),
-            "totalFloors": floors,
-            "calculatedSqFt": round(sum(r["area"] for r in detected_rooms) * 10.764, 1)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/process-layout/procedural")
 async def process_layout_procedural(payload: ProceduralGenerationPayload):
     if not payload.rooms:
-         raise HTTPException(status_code=400, detail="Configuration manifest is completely empty.")
-
+        raise HTTPException(status_code=400, detail="No rooms specified.")
     rooms_output = []
     rooms_per_floor = math.ceil(len(payload.rooms) / payload.total_floors)
     grid_size = math.ceil(math.sqrt(rooms_per_floor))
     floor_counters = {}
-
     for idx, r_spec in enumerate(payload.rooms):
         fl = r_spec.floorAssigned
         if fl not in floor_counters:
             floor_counters[fl] = 0
-
         current_floor_idx = floor_counters[fl]
         floor_counters[fl] += 1
-
         col = current_floor_idx % grid_size
         row = current_floor_idx // grid_size
-
         room_area_meters = r_spec.roomSqFt / 10.764
         side = math.sqrt(room_area_meters)
-
         cx = (col * side) - ((grid_size * side) / 2.0) + (side / 2.0)
         cy = (row * side) - ((grid_size * side) / 2.0) + (side / 2.0)
-
         rooms_output.append({
             "label": f"Lvl {fl} - {r_spec.name}",
             "dimensions": f"{side:.1f}m x {side:.1f}m",
@@ -483,16 +424,21 @@ async def process_layout_procedural(payload: ProceduralGenerationPayload):
             "centerY": cy,
             "elevationZ": float((fl - 1) * 3.0),
             "isOpenSpace": r_spec.isOpenSpace,
-            "walls": generate_box_walls(cx, cy, side, side),
-            "area": float(room_area_meters)
+            "walls": [
+                {"x1": cx - side / 2, "y1": cy - side / 2, "x2": cx + side / 2, "y2": cy - side / 2},
+                {"x1": cx + side / 2, "y1": cy - side / 2, "x2": cx + side / 2, "y2": cy + side / 2},
+                {"x1": cx + side / 2, "y1": cy + side / 2, "x2": cx - side / 2, "y2": cy + side / 2},
+                {"x1": cx - side / 2, "y1": cy + side / 2, "x2": cx - side / 2, "y2": cy - side / 2},
+            ],
+            "area": float(room_area_meters),
         })
-
     return {
         "rooms": rooms_output,
         "totalRooms": len(rooms_output),
         "totalFloors": payload.total_floors,
-        "calculatedSqFt": payload.total_sq_ft
+        "calculatedSqFt": payload.total_sq_ft,
     }
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
