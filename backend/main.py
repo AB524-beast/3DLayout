@@ -52,7 +52,7 @@ def _remove_noise(binary: np.ndarray) -> np.ndarray:
     areas = [(stats[i, cv2.CC_STAT_AREA], i) for i in range(1, num_labels)]
     areas.sort(reverse=True)
     largest = areas[0][0]
-    keep = {i for a, i in areas if a >= largest * 0.02}
+    keep = {i for a, i in areas if a >= largest * 0.005}
     result = np.zeros_like(opened)
     for i in keep:
         result[labels == i] = 255
@@ -80,84 +80,45 @@ def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
 
 
 def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: float,
-                                min_rel_area: float = 0.002, max_rel_area: float = 0.80,
-                                min_dim_m: float = 0.3, max_dim_m: float = 18.0,
-                                use_hierarchy: bool = True, invert_parent: bool = True,
-                                gray: np.ndarray = None) -> List[Dict[str, Any]]:
+                                min_rel_area: float = 0.003, max_rel_area: float = 0.85,
+                                min_dim_m: float = 0.5, max_dim_m: float = 18.0) -> List[Dict[str, Any]]:
     rooms = []
-    method = cv2.RETR_TREE if use_hierarchy else cv2.RETR_EXTERNAL
-    contours, hierarchy = cv2.findContours(binary, method, cv2.CHAIN_APPROX_SIMPLE)
-
-    if hierarchy is None and use_hierarchy:
+    contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None or contours is None or len(contours) == 0:
         return rooms
-    if contours is None or len(contours) == 0:
-        return rooms
+    hierarchy = hierarchy[0]
 
-    if use_hierarchy:
-        hierarchy = hierarchy[0]
-
-    if use_hierarchy:
-        contour_areas = np.array([cv2.contourArea(c) for c in contours])
-        depths = np.zeros(len(contours), dtype=np.int32)
-        for i in range(len(contours)):
-            p = hierarchy[i][3]
-            d = 0
-            while p != -1:
-                d += 1
-                p = hierarchy[p][3]
-            depths[i] = d
-
-    canny_edges = None
-    if gray is not None:
-        med = np.median(gray)
-        low = int(max(0, 0.3 * med))
-        high = int(min(255, 1.2 * med))
-        canny_edges = cv2.Canny(gray, low, high, apertureSize=3)
+    contour_areas = np.array([cv2.contourArea(c) for c in contours])
+    depths = np.zeros(len(contours), dtype=np.int32)
+    for i in range(len(contours)):
+        p = hierarchy[i][3]
+        d = 0
+        while p != -1:
+            d += 1
+            p = hierarchy[p][3]
+        depths[i] = d
 
     for idx, cnt in enumerate(contours):
-        if use_hierarchy:
-            parent = hierarchy[idx][3]
-            if invert_parent and parent == -1:
-                continue
-            if not invert_parent and parent != -1:
-                continue
-            if invert_parent and depths[idx] >= 2:
-                child_area = contour_areas[idx]
-                parent_area = contour_areas[parent]
-                if parent_area <= 0 or child_area < parent_area * 0.08:
-                    continue
+        parent = hierarchy[idx][3]
+        if parent == -1:
+            continue
+        parent_area = contour_areas[parent]
+        child_area = contour_areas[idx]
 
-        area_px = cv2.contourArea(cnt)
-        if area_px < (w * h * min_rel_area) or area_px > (w * h * max_rel_area):
+        if depths[idx] != 1:
+            continue
+        if parent_area <= 0 or child_area < parent_area * 0.05:
             continue
 
-        if gray is not None and area_px >= 500:
-            mask = np.zeros(binary.shape, dtype=np.uint8)
-            cv2.drawContours(mask, [cnt], -1, 255, -1)
-            interior = gray[mask == 255]
-            if len(interior) > 0:
-                if np.std(interior) > 55:
-                    continue
-                if canny_edges is not None:
-                    interior_edges = canny_edges[mask == 255]
-                    if len(interior_edges) > 0:
-                        edge_density = np.sum(interior_edges > 0) / len(interior_edges)
-                        if edge_density > 0.08:
-                            continue
+        area_px = child_area
+        if area_px < (w * h * min_rel_area) or area_px > (w * h * max_rel_area):
+            continue
 
         peri = cv2.arcLength(cnt, True)
         if peri <= 0:
             continue
 
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull)
-        if hull_area <= 0:
-            continue
-        solidity = area_px / hull_area
-        if solidity < 0.45:
-            continue
-
-        epsilon = 0.01 * peri
+        epsilon = 0.012 * peri
         approx = cv2.approxPolyDP(cnt, epsilon, True)
 
         if len(approx) < 4:
@@ -187,11 +148,6 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
         if max_side > 0 and min_side / max_side < 0.10:
             continue
 
-        peri_m = peri / px_to_meter
-        perim_rect = 2.0 * (bb_w + bb_h)
-        if perim_rect > 0 and peri_m / perim_rect > 2.0:
-            continue
-
         rooms.append({
             "label": f"Room {len(rooms) + 1}",
             "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
@@ -206,16 +162,99 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
     return rooms
 
 
-def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float,
-                  gray: np.ndarray = None, **kwargs) -> List[Dict[str, Any]]:
+def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float, **kwargs) -> List[Dict[str, Any]]:
     try:
         binary = binary_fn()
         if binary is None or np.max(binary) == 0:
             return []
         binary = _remove_noise(binary)
-        return _extract_rooms_from_binary(binary, w, h, px_to_meter, gray=gray, **kwargs)
+        return _extract_rooms_from_binary(binary, w, h, px_to_meter, **kwargs)
     except Exception:
         return []
+
+
+def _detect_walls_via_lines(gray: np.ndarray, img_color: np.ndarray,
+                             w: int, h: int, px_to_meter: float) -> List[Dict[str, Any]]:
+    edges = cv2.Canny(gray, 40, 120, apertureSize=3)
+    lines = cv2.HoughLinesP(edges, 1, math.pi / 180, threshold=int(min(w, h) * 0.08),
+                            minLineLength=int(min(w, h) * 0.04),
+                            maxLineGap=int(min(w, h) * 0.02))
+    if lines is None or len(lines) < 4:
+        return []
+
+    wall_mask = np.zeros((h, w), dtype=np.uint8)
+    for line in lines:
+        line = line.flatten()
+        x1, y1, x2, y2 = line[0], line[1], line[2], line[3]
+        cv2.line(wall_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 8)
+
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_k, iterations=2)
+    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_OPEN, close_k, iterations=1)
+    wall_mask = _remove_noise(wall_mask)
+
+    inv = cv2.bitwise_not(wall_mask)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
+    if num_labels < 3:
+        return []
+
+    total_px = w * h
+    candidates = []
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < total_px * 0.003 or area > total_px * 0.85:
+            continue
+        mask_i = (labels == i).astype(np.uint8) * 255
+        cnts, _ = cv2.findContours(mask_i, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        cnt = max(cnts, key=cv2.contourArea)
+        peri = cv2.arcLength(cnt, True)
+        if peri <= 0:
+            continue
+        epsilon = 0.012 * peri
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        if len(approx) < 4:
+            continue
+        approx_pts = approx.reshape(-1, 2)
+        snapped = _snap_orthogonal(approx_pts)
+        approx = snapped.reshape(-1, 1, 2)
+
+        pts_m = []
+        for point in approx:
+            px, py = point[0]
+            mx = (px - w / 2.0) / px_to_meter
+            my = (py - h / 2.0) / px_to_meter
+            pts_m.append([mx, my])
+
+        xs = [p[0] for p in pts_m]
+        ys = [p[1] for p in pts_m]
+        bb_w = max(xs) - min(xs)
+        bb_h = max(ys) - min(ys)
+
+        if bb_w < 0.5 or bb_h < 0.5 or bb_w > 18 or bb_h > 18:
+            continue
+        min_side = min(bb_w, bb_h)
+        max_side = max(bb_w, bb_h)
+        if max_side > 0 and min_side / max_side < 0.10:
+            continue
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        if hull_area > 0 and area / hull_area < 0.35:
+            continue
+
+        candidates.append({
+            "label": f"Room {len(candidates) + 1}",
+            "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
+            "centerX": sum(xs) / len(xs),
+            "centerY": sum(ys) / len(ys),
+            "elevationZ": 0.0,
+            "isOpenSpace": False,
+            "walls": polygon_to_walls(pts_m),
+            "area": round(bb_w * bb_h, 2),
+        })
+
+    return candidates
 
 
 def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
@@ -235,50 +274,17 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     _, _, value = cv2.split(hsv)
     enhanced_hsv = clahe.apply(value)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
     blurred_hsv = cv2.GaussianBlur(enhanced_hsv, (5, 5), 0)
-
-    candidates = []
-
-    def _close(b, iters=2):
-        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, kernel, iterations=iters)
-
-    def strat_otsu_gray():
-        _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_otsu_gray, w, h, px_to_meter, gray=gray))
-
-    def strat_otsu_hsv():
-        _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_otsu_hsv, w, h, px_to_meter, gray=gray))
-
-    def strat_adaptive():
-        b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY_INV, 15, 4)
-        return _close(b, 2)
-    candidates.append(_try_strategy(strat_adaptive, w, h, px_to_meter,
-                                    gray=gray, min_rel_area=0.002, min_dim_m=0.25))
-
-    def strat_canny():
-        med = np.median(blurred)
-        lower = int(max(0, 0.3 * med))
-        upper = int(min(255, 1.2 * med))
-        edges = cv2.Canny(blurred, lower, upper, apertureSize=3)
-        dilated = cv2.dilate(edges, kernel, iterations=3)
-        return cv2.bitwise_not(dilated)
-    candidates.append(_try_strategy(strat_canny, w, h, px_to_meter,
-                                    gray=gray, use_hierarchy=False))
 
     best_rooms = []
     best_score = -1
 
-    def dedup_rooms(rooms):
-        if len(rooms) < 2:
-            return rooms
+    def dedup_rooms(rooms_list):
+        if len(rooms_list) < 2:
+            return rooms_list
         kept = []
-        for r in rooms:
+        for r in rooms_list:
             dup = False
             for k in kept:
                 if abs(r["centerX"] - k["centerX"]) < 0.5 and abs(r["centerY"] - k["centerY"]) < 0.5:
@@ -288,30 +294,61 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
                 kept.append(r)
         return kept
 
-    for rooms in candidates:
+    def score_rooms(rooms):
         if not rooms:
-            continue
+            return -1, []
         rooms = dedup_rooms(rooms)
+        if not rooms:
+            return -1, []
         n = len(rooms)
-        if n == 0:
-            continue
         areas = [r["area"] for r in rooms]
         mean_area = sum(areas) / n
-        std_area = (sum((a - mean_area) ** 2 for a in areas) / n) ** 0.5 if n > 1 else 0
+        valid_rooms = sum(1 for a in areas if 1.5 < a < 80)
+        s = valid_rooms * 20
+        if 2 < mean_area < 60:
+            s += 20
+        if n >= 3:
+            s += 15
+        if n >= 5:
+            s += 10
+        if n >= 8:
+            s += 5
+        return s, rooms
 
-        score = min(n, 12) * 15
-        if 2 < mean_area < 80:
-            score += 25
-        if all(0.5 < a < 120 for a in areas):
-            score += 15
-        if std_area < mean_area * 0.9:
-            score += 5
-        if n >= 2:
-            score += 5
+    for ks in [5, 7, 11, 15, 21, 31, 41, 51, 61]:
+        cand = []
 
-        if score > best_score:
-            best_score = score
-            best_rooms = rooms
+        def _otsu_gray(ksv):
+            _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            br = cv2.getStructuringElement(cv2.MORPH_RECT, (ksv, ksv))
+            return cv2.morphologyEx(b, cv2.MORPH_CLOSE, br, iterations=1)
+        cand.append(_try_strategy(lambda ksv=ks: _otsu_gray(ksv), w, h, px_to_meter))
+
+        def _otsu_hsv(ksv):
+            _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            br = cv2.getStructuringElement(cv2.MORPH_RECT, (ksv, ksv))
+            return cv2.morphologyEx(b, cv2.MORPH_CLOSE, br, iterations=1)
+        cand.append(_try_strategy(lambda ksv=ks: _otsu_hsv(ksv), w, h, px_to_meter))
+
+        def _adaptive_thresh(ksv):
+            b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                      cv2.THRESH_BINARY_INV, 15, 3)
+            br = cv2.getStructuringElement(cv2.MORPH_RECT, (ksv, ksv))
+            return cv2.morphologyEx(b, cv2.MORPH_CLOSE, br, iterations=1)
+        cand.append(_try_strategy(lambda ksv=ks: _adaptive_thresh(ksv), w, h, px_to_meter,
+                                  min_rel_area=0.002, min_dim_m=0.3))
+
+        for rooms in cand:
+            s, deduped = score_rooms(rooms)
+            if s > best_score:
+                best_score = s
+                best_rooms = deduped
+
+    line_rooms = _detect_walls_via_lines(gray, img_color, w, h, px_to_meter)
+    s, deduped = score_rooms(line_rooms)
+    if s > best_score:
+        best_score = s
+        best_rooms = deduped
 
     return best_rooms
 
