@@ -350,13 +350,76 @@ async def process_layout_sample(floors: int = Query(1)):
     cx = (min(all_xs) + max(all_xs)) / 2.0
     cy = (min(all_ys) + max(all_ys)) / 2.0
 
+    def _rdp_simplify(pts, eps_px=3.0):
+        if len(pts) < 3:
+            return pts
+        pts = pts.copy()
+        stack = [(0, len(pts) - 1)]
+        mask = [True] * len(pts)
+        while stack:
+            first, last = stack.pop()
+            if last - first < 2:
+                continue
+            x1, y1 = pts[first]
+            x2, y2 = pts[last]
+            dx, dy = x2 - x1, y2 - y1
+            denom = dx * dx + dy * dy
+            max_dist = 0
+            max_idx = first
+            for i in range(first + 1, last):
+                xi, yi = pts[i]
+                if denom == 0:
+                    dist = (xi - x1) ** 2 + (yi - y1) ** 2
+                else:
+                    t = ((xi - x1) * dx + (yi - y1) * dy) / denom
+                    if t < 0:
+                        dist = (xi - x1) ** 2 + (yi - y1) ** 2
+                    elif t > 1:
+                        dist = (xi - x2) ** 2 + (yi - y2) ** 2
+                    else:
+                        px = x1 + t * dx
+                        py = y1 + t * dy
+                        dist = (xi - px) ** 2 + (yi - py) ** 2
+                if dist > max_dist:
+                    max_dist = dist
+                    max_idx = i
+            if max_dist > eps_px * eps_px:
+                stack.append((first, max_idx))
+                stack.append((max_idx, last))
+            else:
+                for i in range(first + 1, last):
+                    mask[i] = False
+        return [pts[i] for i in range(len(pts)) if mask[i]]
+
     rooms_out = []
     for r in raw["rooms"]:
-        pts_m = [[(px - cx) / px_to_meter, (py - cy) / px_to_meter] for px, py in r["polygon_points"]]
+        pts_px = r["polygon_points"]
+        if len(pts_px) < 3:
+            continue
+        simplified = _rdp_simplify(pts_px, eps_px=5.0)
+        if len(simplified) < 3:
+            simplified = pts_px
+        snapped = _snap_orthogonal(np.array(simplified, dtype=np.int32).reshape(-1, 2))
+        snapped_pts = snapped.tolist()
+
+        pts_m = [[(px - cx) / px_to_meter, (py - cy) / px_to_meter] for px, py in snapped_pts]
         xs = [p[0] for p in pts_m]
         ys = [p[1] for p in pts_m]
         bb_w = max(xs) - min(xs)
         bb_h = max(ys) - min(ys)
+
+        min_side = min(bb_w, bb_h)
+        area_px2 = 0.0
+        n = len(snapped_pts)
+        for i in range(n):
+            x1, y1 = snapped_pts[i]
+            x2, y2 = snapped_pts[(i + 1) % n]
+            area_px2 += (x1 * y2) - (x2 * y1)
+        area_m2 = round(abs(area_px2) / 2.0 / (px_to_meter ** 2), 2)
+
+        if min_side < 0.8 or area_m2 < 1.0:
+            continue
+
         floors_out = []
         for i in range(len(pts_m)):
             x1, y1 = pts_m[i]
@@ -371,7 +434,7 @@ async def process_layout_sample(floors: int = Query(1)):
             "elevationZ": 0.0,
             "isOpenSpace": False,
             "walls": floors_out,
-            "area": round(bb_w * bb_h, 2),
+            "area": area_m2,
         })
 
     return build_response(rooms_out, floors)
