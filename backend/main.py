@@ -162,6 +162,95 @@ def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: 
     return rooms
 
 
+def _close_img(binary: np.ndarray, kernel_size: int) -> np.ndarray:
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+
+def _edge_based_binary(gray: np.ndarray) -> np.ndarray:
+    med = np.median(gray)
+    low = int(max(0, 0.3 * med))
+    high = int(min(255, 1.2 * med))
+    edges = cv2.Canny(gray, low, high, apertureSize=3)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated = cv2.dilate(edges, kernel, iterations=3)
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    return cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, close_k, iterations=1)
+
+
+def _segment_via_watershed(gray: np.ndarray, w: int, h: int,
+                            px_to_meter: float) -> List[Dict[str, Any]]:
+    med = np.median(gray)
+    low = int(max(0, 0.3 * med))
+    high = int(min(255, 1.2 * med))
+    edges = cv2.Canny(gray, low, high, apertureSize=3)
+    kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    barriers = cv2.dilate(edges, kernel3, iterations=4)
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    barriers = cv2.morphologyEx(barriers, cv2.MORPH_CLOSE, close_k, iterations=2)
+
+    inv = cv2.bitwise_not(barriers)
+    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
+    dist = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    _, sure_fg = cv2.threshold(dist, 0.25 * 255, 255, cv2.THRESH_BINARY)
+    sure_fg = cv2.morphologyEx(sure_fg, cv2.MORPH_OPEN, kernel3, iterations=2)
+
+    _, markers = cv2.connectedComponents(sure_fg.astype(np.uint8))
+    markers = markers + 1
+    markers[barriers == 255] = 0
+
+    color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    markers = cv2.watershed(color, markers)
+
+    rooms = []
+    for label in range(2, markers.max() + 1):
+        mask = np.zeros((h, w), dtype=np.uint8)
+        mask[markers == label] = 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel3, iterations=1)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        cnt = max(cnts, key=cv2.contourArea)
+        peri = cv2.arcLength(cnt, True)
+        if peri <= 0:
+            continue
+        epsilon = 0.012 * peri
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        if len(approx) < 4:
+            continue
+        approx_pts = approx.reshape(-1, 2)
+        snapped = _snap_orthogonal(approx_pts)
+        approx = snapped.reshape(-1, 1, 2)
+        pts_m = []
+        for point in approx:
+            px, py = point[0]
+            mx = (px - w / 2.0) / px_to_meter
+            my = (py - h / 2.0) / px_to_meter
+            pts_m.append([mx, my])
+        xs = [p[0] for p in pts_m]
+        ys = [p[1] for p in pts_m]
+        bb_w = max(xs) - min(xs)
+        bb_h = max(ys) - min(ys)
+        if bb_w < 0.5 or bb_h < 0.5 or bb_w > 18 or bb_h > 18:
+            continue
+        min_side = min(bb_w, bb_h)
+        max_side = max(bb_w, bb_h)
+        if max_side > 0 and min_side / max_side < 0.10:
+            continue
+        rooms.append({
+            "label": f"Room {len(rooms) + 1}",
+            "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
+            "centerX": sum(xs) / len(xs),
+            "centerY": sum(ys) / len(ys),
+            "elevationZ": 0.0,
+            "isOpenSpace": False,
+            "walls": polygon_to_walls(pts_m),
+            "area": round(bb_w * bb_h, 2),
+        })
+    return rooms
+
+
 def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float, **kwargs) -> List[Dict[str, Any]]:
     try:
         binary = binary_fn()
@@ -277,6 +366,13 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
     blurred_hsv = cv2.GaussianBlur(enhanced_hsv, (5, 5), 0)
 
+    # Additional preprocessed versions for robustness
+    blurred_raw = cv2.GaussianBlur(gray, (3, 3), 0)
+    bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+    blurred_bilateral = cv2.GaussianBlur(bilateral, (3, 3), 0)
+    norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    blurred_norm = cv2.GaussianBlur(norm, (3, 3), 0)
+
     best_rooms = []
     best_score = -1
 
@@ -315,35 +411,85 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
             s += 5
         return s, rooms
 
-    for ks in [5, 7, 11, 15, 21, 31, 41, 51, 61]:
-        cand = []
+    def try_strat(fn, **kwargs):
+        rooms = _try_strategy(fn, w, h, px_to_meter, **kwargs)
+        nonlocal best_score, best_rooms
+        s, deduped = score_rooms(rooms)
+        if s > best_score:
+            best_score = s
+            best_rooms = deduped
 
-        def _otsu_gray(ksv):
-            _, b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            br = cv2.getStructuringElement(cv2.MORPH_RECT, (ksv, ksv))
-            return cv2.morphologyEx(b, cv2.MORPH_CLOSE, br, iterations=1)
-        cand.append(_try_strategy(lambda ksv=ks: _otsu_gray(ksv), w, h, px_to_meter))
+    # --- Threshold-based strategies with multiple kernel sizes ---
+    for ks in [5, 7, 11, 15, 21, 31, 41, 51, 61, 71]:
 
-        def _otsu_hsv(ksv):
-            _, b = cv2.threshold(blurred_hsv, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            br = cv2.getStructuringElement(cv2.MORPH_RECT, (ksv, ksv))
-            return cv2.morphologyEx(b, cv2.MORPH_CLOSE, br, iterations=1)
-        cand.append(_try_strategy(lambda ksv=ks: _otsu_hsv(ksv), w, h, px_to_meter))
+        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred, 0, 255,
+                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
 
-        def _adaptive_thresh(ksv):
-            b = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                      cv2.THRESH_BINARY_INV, 15, 3)
-            br = cv2.getStructuringElement(cv2.MORPH_RECT, (ksv, ksv))
-            return cv2.morphologyEx(b, cv2.MORPH_CLOSE, br, iterations=1)
-        cand.append(_try_strategy(lambda ksv=ks: _adaptive_thresh(ksv), w, h, px_to_meter,
-                                  min_rel_area=0.002, min_dim_m=0.3))
+        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_hsv, 0, 255,
+                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
 
-        for rooms in cand:
-            s, deduped = score_rooms(rooms)
-            if s > best_score:
-                best_score = s
-                best_rooms = deduped
+        try_strat(lambda ksv=ks: _close_img(cv2.adaptiveThreshold(blurred, 255,
+                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 3), ksv),
+                   min_rel_area=0.002, min_dim_m=0.3)
 
+        try_strat(lambda ksv=ks: _close_img(cv2.adaptiveThreshold(blurred, 255,
+                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 4), ksv),
+                   min_rel_area=0.002, min_dim_m=0.3)
+
+        try_strat(lambda ksv=ks: _close_img(cv2.adaptiveThreshold(blurred, 255,
+                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 5), ksv),
+                   min_rel_area=0.002, min_dim_m=0.3)
+
+        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_raw, 0, 255,
+                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
+
+        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_bilateral, 0, 255,
+                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv),
+                   min_rel_area=0.002, min_dim_m=0.3)
+
+        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_norm, 0, 255,
+                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
+
+        # Also try THRESH_BINARY + invert (for light walls on dark background)
+        try_strat(lambda ksv=ks: cv2.bitwise_not(_close_img(cv2.threshold(blurred, 0, 255,
+                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], ksv)))
+
+        try_strat(lambda ksv=ks: cv2.bitwise_not(_close_img(cv2.threshold(blurred_hsv, 0, 255,
+                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], ksv)))
+
+        try_strat(lambda ksv=ks: cv2.bitwise_not(_close_img(cv2.threshold(blurred_norm, 0, 255,
+                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], ksv)))
+
+    # --- Edge-based strategy (Canny + dilate + close) ---
+    try_strat(lambda: _edge_based_binary(bilateral))
+
+    # --- Watershed fallback ---
+    if best_score < 20:
+        ws_rooms = _segment_via_watershed(bilateral, w, h, px_to_meter)
+        s, deduped = score_rooms(ws_rooms)
+        if s > best_score:
+            best_score = s
+            best_rooms = deduped
+
+    # --- Wide close fallback ---
+    if best_score < 20:
+        _best_wide_score = -1
+        _best_wide_rooms = []
+        for src in [blurred, blurred_raw, blurred_norm]:
+            _, bin_src = cv2.threshold(src, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            for wk in [71, 101, 151]:
+                wide = _close_img(bin_src, wk)
+                clean = _remove_noise(wide)
+                r = _extract_rooms_from_binary(clean, w, h, px_to_meter)
+                s2, deduped2 = score_rooms(r)
+                if s2 > _best_wide_score:
+                    _best_wide_score = s2
+                    _best_wide_rooms = deduped2
+        if _best_wide_score > best_score:
+            best_score = _best_wide_score
+            best_rooms = _best_wide_rooms
+
+    # --- Hough line fallback ---
     line_rooms = _detect_walls_via_lines(gray, img_color, w, h, px_to_meter)
     s, deduped = score_rooms(line_rooms)
     if s > best_score:
