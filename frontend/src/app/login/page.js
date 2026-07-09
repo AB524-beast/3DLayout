@@ -2,8 +2,12 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '../../context/AuthContext';
 
 export default function LoginPage() {
+  const { login, register, user } = useAuth();
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState('login');
 
   const [loginEmail, setLoginEmail] = useState('');
@@ -11,15 +15,40 @@ export default function LoginPage() {
   const [signupName, setSignupName] = useState('');
   const [signupEmail, setSignupEmail] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-  const handleLogin = (e) => {
+  if (user) {
+    router.push('/dashboard');
+    return null;
+  }
+
+  const handleLogin = async (e) => {
     e.preventDefault();
-    console.log('Login', { email: loginEmail, password: loginPassword });
+    setError(null);
+    setLoading(true);
+    try {
+      await login(loginEmail, loginPassword);
+      router.push('/dashboard');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleSignup = (e) => {
+  const handleSignup = async (e) => {
     e.preventDefault();
-    console.log('Signup', { name: signupName, email: signupEmail, password: signupPassword });
+    setError(null);
+    setLoading(true);
+    try {
+      await register(signupName, signupEmail, signupPassword);
+      router.push('/dashboard');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -82,9 +111,10 @@ export default function LoginPage() {
               </div>
               <button
                 type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-all"
+                disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-all"
               >
-                Sign In
+                {loading ? 'Signing in...' : 'Sign In'}
               </button>
             </form>
           ) : (
@@ -124,11 +154,18 @@ export default function LoginPage() {
               </div>
               <button
                 type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-all"
+                disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-all"
               >
-                Create Account
+                {loading ? 'Creating account...' : 'Create Account'}
               </button>
             </form>
+          )}
+
+          {error && (
+            <div className="mt-4 p-3 bg-red-950/40 border border-red-900/60 rounded-xl text-xs text-red-400">
+              {error}
+            </div>
           )}
 
           <p className="text-center text-[10px] text-gray-600 mt-4">

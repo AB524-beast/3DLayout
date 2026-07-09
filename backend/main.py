@@ -1,13 +1,21 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import numpy as np
 import cv2
 import math
 import json
 import os
+import base64
+from datetime import datetime, timezone, timedelta
+from passlib.context import CryptContext
+
+from database import init_db, get_db, User, UserImage
+import jwt
+from jwt.exceptions import JWTException as JWTError
 
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
 
@@ -43,24 +51,6 @@ def polygon_to_walls(points_m: List[List[float]]) -> List[Dict[str, float]]:
     return walls
 
 
-def _remove_noise(binary: np.ndarray) -> np.ndarray:
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
-    if num_labels < 3:
-        return opened
-    areas = [(stats[i, cv2.CC_STAT_AREA], i) for i in range(1, num_labels)]
-    areas.sort(reverse=True)
-    largest = areas[0][0]
-    keep = {i for a, i in areas if a >= largest * 0.005}
-    result = np.zeros_like(opened)
-    for i in keep:
-        result[labels == i] = 255
-    if np.max(result) == 0:
-        return binary
-    return result
-
-
 def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
     n = len(pts)
     snapped = pts.copy().astype(np.float64)
@@ -79,229 +69,52 @@ def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
     return snapped.astype(np.int32)
 
 
-def _extract_rooms_from_binary(binary: np.ndarray, w: int, h: int, px_to_meter: float,
-                                min_rel_area: float = 0.003, max_rel_area: float = 0.85,
-                                min_dim_m: float = 0.5, max_dim_m: float = 18.0) -> List[Dict[str, Any]]:
-    rooms = []
-    contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None or contours is None or len(contours) == 0:
-        return rooms
-    hierarchy = hierarchy[0]
-
-    contour_areas = np.array([cv2.contourArea(c) for c in contours])
-    depths = np.zeros(len(contours), dtype=np.int32)
-    for i in range(len(contours)):
-        p = hierarchy[i][3]
-        d = 0
-        while p != -1:
-            d += 1
-            p = hierarchy[p][3]
-        depths[i] = d
-
-    for idx, cnt in enumerate(contours):
-        parent = hierarchy[idx][3]
-        if parent == -1:
-            continue
-        parent_area = contour_areas[parent]
-        child_area = contour_areas[idx]
-
-        if depths[idx] != 1:
-            continue
-        if parent_area <= 0 or child_area < parent_area * 0.05:
-            continue
-
-        area_px = child_area
-        if area_px < (w * h * min_rel_area) or area_px > (w * h * max_rel_area):
-            continue
-
-        peri = cv2.arcLength(cnt, True)
-        if peri <= 0:
-            continue
-
-        epsilon = 0.012 * peri
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-
-        if len(approx) < 4:
-            continue
-
-        approx_pts = approx.reshape(-1, 2)
-        snapped = _snap_orthogonal(approx_pts)
-        approx = snapped.reshape(-1, 1, 2)
-
-        pts_m = []
-        for point in approx:
-            px, py = point[0]
-            mx = (px - w / 2.0) / px_to_meter
-            my = (py - h / 2.0) / px_to_meter
-            pts_m.append([mx, my])
-
-        xs = [p[0] for p in pts_m]
-        ys = [p[1] for p in pts_m]
-        bb_w = max(xs) - min(xs)
-        bb_h = max(ys) - min(ys)
-
-        if bb_w < min_dim_m or bb_h < min_dim_m or bb_w > max_dim_m or bb_h > max_dim_m:
-            continue
-
-        min_side = min(bb_w, bb_h)
-        max_side = max(bb_w, bb_h)
-        if max_side > 0 and min_side / max_side < 0.10:
-            continue
-
-        rooms.append({
-            "label": f"Room {len(rooms) + 1}",
-            "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
-            "centerX": sum(xs) / len(xs),
-            "centerY": sum(ys) / len(ys),
-            "elevationZ": 0.0,
-            "isOpenSpace": False,
-            "walls": polygon_to_walls(pts_m),
-            "area": round(bb_w * bb_h, 2),
-        })
-
-    return rooms
-
-
-def _close_img(binary: np.ndarray, kernel_size: int) -> np.ndarray:
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-    return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-
-def _edge_based_binary(gray: np.ndarray) -> np.ndarray:
-    med = np.median(gray)
-    low = int(max(0, 0.3 * med))
-    high = int(min(255, 1.2 * med))
-    edges = cv2.Canny(gray, low, high, apertureSize=3)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    dilated = cv2.dilate(edges, kernel, iterations=3)
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-    return cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, close_k, iterations=1)
-
-
-def _segment_via_watershed(gray: np.ndarray, w: int, h: int,
-                            px_to_meter: float) -> List[Dict[str, Any]]:
-    med = np.median(gray)
-    low = int(max(0, 0.3 * med))
-    high = int(min(255, 1.2 * med))
-    edges = cv2.Canny(gray, low, high, apertureSize=3)
-    kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    barriers = cv2.dilate(edges, kernel3, iterations=4)
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    barriers = cv2.morphologyEx(barriers, cv2.MORPH_CLOSE, close_k, iterations=2)
-
-    inv = cv2.bitwise_not(barriers)
-    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
-    dist = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-    _, sure_fg = cv2.threshold(dist, 0.25 * 255, 255, cv2.THRESH_BINARY)
-    sure_fg = cv2.morphologyEx(sure_fg, cv2.MORPH_OPEN, kernel3, iterations=2)
-
-    _, markers = cv2.connectedComponents(sure_fg.astype(np.uint8))
-    markers = markers + 1
-    markers[barriers == 255] = 0
-
-    color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    markers = cv2.watershed(color, markers)
-
-    rooms = []
-    for label in range(2, markers.max() + 1):
-        mask = np.zeros((h, w), dtype=np.uint8)
-        mask[markers == label] = 255
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel3, iterations=1)
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        cnt = max(cnts, key=cv2.contourArea)
-        peri = cv2.arcLength(cnt, True)
-        if peri <= 0:
-            continue
-        epsilon = 0.012 * peri
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        if len(approx) < 4:
-            continue
-        approx_pts = approx.reshape(-1, 2)
-        snapped = _snap_orthogonal(approx_pts)
-        approx = snapped.reshape(-1, 1, 2)
-        pts_m = []
-        for point in approx:
-            px, py = point[0]
-            mx = (px - w / 2.0) / px_to_meter
-            my = (py - h / 2.0) / px_to_meter
-            pts_m.append([mx, my])
-        xs = [p[0] for p in pts_m]
-        ys = [p[1] for p in pts_m]
-        bb_w = max(xs) - min(xs)
-        bb_h = max(ys) - min(ys)
-        if bb_w < 0.5 or bb_h < 0.5 or bb_w > 18 or bb_h > 18:
-            continue
-        min_side = min(bb_w, bb_h)
-        max_side = max(bb_w, bb_h)
-        if max_side > 0 and min_side / max_side < 0.10:
-            continue
-        rooms.append({
-            "label": f"Room {len(rooms) + 1}",
-            "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
-            "centerX": sum(xs) / len(xs),
-            "centerY": sum(ys) / len(ys),
-            "elevationZ": 0.0,
-            "isOpenSpace": False,
-            "walls": polygon_to_walls(pts_m),
-            "area": round(bb_w * bb_h, 2),
-        })
-    return rooms
-
-
-def _try_strategy(binary_fn, w: int, h: int, px_to_meter: float, **kwargs) -> List[Dict[str, Any]]:
-    try:
-        binary = binary_fn()
-        if binary is None or np.max(binary) == 0:
-            return []
-        binary = _remove_noise(binary)
-        return _extract_rooms_from_binary(binary, w, h, px_to_meter, **kwargs)
-    except Exception:
-        return []
-
-
-def _detect_walls_via_lines(gray: np.ndarray, img_color: np.ndarray,
-                             w: int, h: int, px_to_meter: float) -> List[Dict[str, Any]]:
-    edges = cv2.Canny(gray, 40, 120, apertureSize=3)
-    lines = cv2.HoughLinesP(edges, 1, math.pi / 180, threshold=int(min(w, h) * 0.08),
-                            minLineLength=int(min(w, h) * 0.04),
-                            maxLineGap=int(min(w, h) * 0.02))
-    if lines is None or len(lines) < 4:
-        return []
-
-    wall_mask = np.zeros((h, w), dtype=np.uint8)
-    for line in lines:
-        line = line.flatten()
-        x1, y1, x2, y2 = line[0], line[1], line[2], line[3]
-        cv2.line(wall_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 8)
-
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_k, iterations=2)
-    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_OPEN, close_k, iterations=1)
-    wall_mask = _remove_noise(wall_mask)
-
-    inv = cv2.bitwise_not(wall_mask)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
-    if num_labels < 3:
-        return []
-
+def _segment_rooms(gray: np.ndarray, w: int, h: int,
+                   px_to_meter: float) -> List[Dict[str, Any]]:
     total_px = w * h
-    candidates = []
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < total_px * 0.003 or area > total_px * 0.85:
+    min_room_area_px = total_px * 0.008
+    min_wall_area_px = total_px * 0.003
+
+    # ---- Step 1: binary threshold (walls + text = dark) ----
+    _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # ---- Step 2: remove small dark components (text) ----------
+    # Text characters are small isolated dark blobs.  Connected-component
+    # filtering with a generous size threshold kills them while keeping
+    # wall lines (which are long/stretched and belong to larger components
+    # or chain into other wall components).
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    walls = np.zeros_like(dark)
+    if num_labels > 1:
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_AREA] >= min_wall_area_px:
+                walls[labels == i] = 255
+
+    # If filtering removed everything fall back to the original.
+    if cv2.countNonZero(walls) < total_px * 0.01:
+        walls = dark
+
+    # ---- Step 3: close gaps in walls ---------------------------
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+    walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=3)
+
+    # ---- Step 4: thicken walls so narrow passages close --------
+    dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    walls = cv2.dilate(walls, dilate_k, iterations=3)
+
+    # ---- Step 5: rooms = white regions = inverted walls --------
+    rooms_bin = cv2.bitwise_not(walls)
+
+    # ---- Step 6: find contours of white regions ---------------
+    cnts, _ = cv2.findContours(rooms_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    rooms = []
+    for cnt in cnts:
+        area = cv2.contourArea(cnt)
+        if area < min_room_area_px:
             continue
-        mask_i = (labels == i).astype(np.uint8) * 255
-        cnts, _ = cv2.findContours(mask_i, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        cnt = max(cnts, key=cv2.contourArea)
-        peri = cv2.arcLength(cnt, True)
-        if peri <= 0:
-            continue
-        epsilon = 0.012 * peri
+
+        epsilon = 0.015 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, True)
         if len(approx) < 4:
             continue
@@ -320,20 +133,15 @@ def _detect_walls_via_lines(gray: np.ndarray, img_color: np.ndarray,
         ys = [p[1] for p in pts_m]
         bb_w = max(xs) - min(xs)
         bb_h = max(ys) - min(ys)
-
-        if bb_w < 0.5 or bb_h < 0.5 or bb_w > 18 or bb_h > 18:
+        if bb_w < 0.8 or bb_h < 0.8 or bb_w > 18 or bb_h > 18:
             continue
         min_side = min(bb_w, bb_h)
         max_side = max(bb_w, bb_h)
-        if max_side > 0 and min_side / max_side < 0.10:
-            continue
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull)
-        if hull_area > 0 and area / hull_area < 0.35:
+        if max_side > 0 and min_side / max_side < 0.15:
             continue
 
-        candidates.append({
-            "label": f"Room {len(candidates) + 1}",
+        rooms.append({
+            "label": f"Room {len(rooms) + 1}",
             "dimensions": f"{bb_w:.1f}m x {bb_h:.1f}m",
             "centerX": sum(xs) / len(xs),
             "centerY": sum(ys) / len(ys),
@@ -343,7 +151,7 @@ def _detect_walls_via_lines(gray: np.ndarray, img_color: np.ndarray,
             "area": round(bb_w * bb_h, 2),
         })
 
-    return candidates
+    return rooms
 
 
 def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
@@ -356,147 +164,9 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     px_to_meter = h / 14.0
 
     gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    hsv = cv2.cvtColor(img_color, cv2.COLOR_BGR2HSV)
-    _, _, value = cv2.split(hsv)
-    enhanced_hsv = clahe.apply(value)
-
-    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
-    blurred_hsv = cv2.GaussianBlur(enhanced_hsv, (5, 5), 0)
-
-    # Additional preprocessed versions for robustness
-    blurred_raw = cv2.GaussianBlur(gray, (3, 3), 0)
     bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
-    blurred_bilateral = cv2.GaussianBlur(bilateral, (3, 3), 0)
-    norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-    blurred_norm = cv2.GaussianBlur(norm, (3, 3), 0)
 
-    best_rooms = []
-    best_score = -1
-
-    def dedup_rooms(rooms_list):
-        if len(rooms_list) < 2:
-            return rooms_list
-        kept = []
-        for r in rooms_list:
-            dup = False
-            for k in kept:
-                if abs(r["centerX"] - k["centerX"]) < 0.5 and abs(r["centerY"] - k["centerY"]) < 0.5:
-                    dup = True
-                    break
-            if not dup:
-                kept.append(r)
-        return kept
-
-    def score_rooms(rooms):
-        if not rooms:
-            return -1, []
-        rooms = dedup_rooms(rooms)
-        if not rooms:
-            return -1, []
-        n = len(rooms)
-        areas = [r["area"] for r in rooms]
-        mean_area = sum(areas) / n
-        valid_rooms = sum(1 for a in areas if 1.5 < a < 80)
-        s = valid_rooms * 20
-        if 2 < mean_area < 60:
-            s += 20
-        if n >= 3:
-            s += 15
-        if n >= 5:
-            s += 10
-        if n >= 8:
-            s += 5
-        return s, rooms
-
-    def try_strat(fn, **kwargs):
-        rooms = _try_strategy(fn, w, h, px_to_meter, **kwargs)
-        nonlocal best_score, best_rooms
-        s, deduped = score_rooms(rooms)
-        if s > best_score:
-            best_score = s
-            best_rooms = deduped
-
-    # --- Threshold-based strategies with multiple kernel sizes ---
-    for ks in [5, 7, 11, 15, 21, 31, 41, 51, 61, 71]:
-
-        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred, 0, 255,
-                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
-
-        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_hsv, 0, 255,
-                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
-
-        try_strat(lambda ksv=ks: _close_img(cv2.adaptiveThreshold(blurred, 255,
-                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 3), ksv),
-                   min_rel_area=0.002, min_dim_m=0.3)
-
-        try_strat(lambda ksv=ks: _close_img(cv2.adaptiveThreshold(blurred, 255,
-                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 4), ksv),
-                   min_rel_area=0.002, min_dim_m=0.3)
-
-        try_strat(lambda ksv=ks: _close_img(cv2.adaptiveThreshold(blurred, 255,
-                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 5), ksv),
-                   min_rel_area=0.002, min_dim_m=0.3)
-
-        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_raw, 0, 255,
-                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
-
-        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_bilateral, 0, 255,
-                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv),
-                   min_rel_area=0.002, min_dim_m=0.3)
-
-        try_strat(lambda ksv=ks: _close_img(cv2.threshold(blurred_norm, 0, 255,
-                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1], ksv))
-
-        # Also try THRESH_BINARY + invert (for light walls on dark background)
-        try_strat(lambda ksv=ks: cv2.bitwise_not(_close_img(cv2.threshold(blurred, 0, 255,
-                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], ksv)))
-
-        try_strat(lambda ksv=ks: cv2.bitwise_not(_close_img(cv2.threshold(blurred_hsv, 0, 255,
-                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], ksv)))
-
-        try_strat(lambda ksv=ks: cv2.bitwise_not(_close_img(cv2.threshold(blurred_norm, 0, 255,
-                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], ksv)))
-
-    # --- Edge-based strategy (Canny + dilate + close) ---
-    try_strat(lambda: _edge_based_binary(bilateral))
-
-    # --- Watershed fallback ---
-    if best_score < 20:
-        ws_rooms = _segment_via_watershed(bilateral, w, h, px_to_meter)
-        s, deduped = score_rooms(ws_rooms)
-        if s > best_score:
-            best_score = s
-            best_rooms = deduped
-
-    # --- Wide close fallback ---
-    if best_score < 20:
-        _best_wide_score = -1
-        _best_wide_rooms = []
-        for src in [blurred, blurred_raw, blurred_norm]:
-            _, bin_src = cv2.threshold(src, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            for wk in [71, 101, 151]:
-                wide = _close_img(bin_src, wk)
-                clean = _remove_noise(wide)
-                r = _extract_rooms_from_binary(clean, w, h, px_to_meter)
-                s2, deduped2 = score_rooms(r)
-                if s2 > _best_wide_score:
-                    _best_wide_score = s2
-                    _best_wide_rooms = deduped2
-        if _best_wide_score > best_score:
-            best_score = _best_wide_score
-            best_rooms = _best_wide_rooms
-
-    # --- Hough line fallback ---
-    line_rooms = _detect_walls_via_lines(gray, img_color, w, h, px_to_meter)
-    s, deduped = score_rooms(line_rooms)
-    if s > best_score:
-        best_score = s
-        best_rooms = deduped
-
-    return best_rooms
+    return _segment_rooms(bilateral, w, h, px_to_meter)
 
 
 def build_response(rooms: List[Dict[str, Any]], floors: int) -> dict:
@@ -579,6 +249,21 @@ async def process_layout_sample(floors: int = Query(1)):
         pts_px = r["polygon_points"]
         if len(pts_px) < 3:
             continue
+
+        # Pixel-level filtering to discard text-like regions before
+        # any further processing.  Text annotations in the neural-net
+        # output are typically very small, extremely narrow, or both.
+        xs_px = [p[0] for p in pts_px]
+        ys_px = [p[1] for p in pts_px]
+        pw = max(xs_px) - min(xs_px)
+        ph = max(ys_px) - min(ys_px)
+        if pw < 50 or ph < 50:
+            continue
+        min_dim_px = min(pw, ph)
+        max_dim_px = max(pw, ph)
+        if max_dim_px > 0 and min_dim_px / max_dim_px < 0.12:
+            continue
+
         simplified = _rdp_simplify(pts_px, eps_px=5.0)
         if len(simplified) < 3:
             simplified = pts_px
@@ -655,6 +340,19 @@ async def process_layout_json(payload: List[JSONRoom], floors: int = Query(1)):
     rooms_output = []
     for r in payload:
         raw_points = r.polygon_points
+
+        # Text-region filter (pixel level)
+        xs_px = [p[0] for p in raw_points]
+        ys_px = [p[1] for p in raw_points]
+        pw = max(xs_px) - min(xs_px)
+        ph = max(ys_px) - min(ys_px)
+        if pw < 50 or ph < 50:
+            continue
+        min_dim_px = min(pw, ph)
+        max_dim_px = max(pw, ph)
+        if max_dim_px > 0 and min_dim_px / max_dim_px < 0.12:
+            continue
+
         pts_m = [[(px - canvas_cx) / px_to_meter, (py - canvas_cy) / px_to_meter] for px, py in raw_points]
         xs = [p[0] for p in pts_m]
         ys = [p[1] for p in pts_m]
@@ -725,5 +423,184 @@ async def process_layout_procedural(payload: ProceduralGenerationPayload):
     }
 
 
+# ── Auth / User storage ──────────────────────────────────────────────
+
+SECRET_KEY = os.environ.get("JWT_SECRET", "dev-secret-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+
+pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+security = HTTPBearer(auto_error=False)
+
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "user_uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def create_access_token(user_id: int) -> str:
+    payload = {
+        "sub": str(user_id),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Optional[User]:
+    if creds is None:
+        return None
+    try:
+        token = creds.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = int(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        return None
+    db = next(get_db())
+    try:
+        return db.query(User).filter(User.id == user_id).first()
+    finally:
+        db.close()
+
+
+class AuthRegisterBody(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class AuthLoginBody(BaseModel):
+    email: str
+    password: str
+
+
+class SaveLayoutBody(BaseModel):
+    filename: str
+    image_data: Optional[str] = None
+    room_data: Optional[str] = None
+
+
+@app.on_event("startup")
+async def startup():
+    try:
+        init_db()
+    except Exception as e:
+        print(f"[DB] init error (non-fatal): {e}")
+
+
+@app.post("/api/v1/auth/register")
+async def register(body: AuthRegisterBody):
+    db = next(get_db())
+    try:
+        existing = db.query(User).filter(User.email == body.email).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Email already registered")
+        user = User(
+            name=body.name,
+            email=body.email,
+            password_hash=pwd_ctx.hash(body.password),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        token = create_access_token(user.id)
+        return {
+            "token": token,
+            "user": {"id": user.id, "name": user.name, "email": user.email},
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/v1/auth/login")
+async def login(body: AuthLoginBody):
+    db = next(get_db())
+    try:
+        user = db.query(User).filter(User.email == body.email).first()
+        if not user or not pwd_ctx.verify(body.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        token = create_access_token(user.id)
+        return {
+            "token": token,
+            "user": {"id": user.id, "name": user.name, "email": user.email},
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/auth/me")
+async def get_me(user: User = Depends(get_current_user)):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"id": user.id, "name": user.name, "email": user.email}
+
+
+@app.post("/api/v1/auth/save-layout")
+async def save_layout(body: SaveLayoutBody, user: User = Depends(get_current_user)):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    image_path = None
+    if body.image_data:
+        img_bytes = base64.b64decode(body.image_data)
+        safe_name = f"user_{user.id}_{int(datetime.now().timestamp())}_{body.filename}"
+        full_path = os.path.join(UPLOAD_DIR, safe_name)
+        with open(full_path, "wb") as f:
+            f.write(img_bytes)
+        image_path = safe_name
+
+    db = next(get_db())
+    try:
+        img = UserImage(
+            user_id=user.id,
+            filename=body.filename,
+            image_path=image_path,
+            room_data=body.room_data,
+        )
+        db.add(img)
+        db.commit()
+        db.refresh(img)
+        return {"id": img.id, "filename": img.filename, "created_at": img.created_at.isoformat()}
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/auth/my-layouts")
+async def get_my_layouts(user: User = Depends(get_current_user)):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    db = next(get_db())
+    try:
+        results = []
+        for img in user.images:
+            results.append({
+                "id": img.id,
+                "filename": img.filename,
+                "room_data": json.loads(img.room_data) if img.room_data else None,
+                "created_at": img.created_at.isoformat(),
+            })
+        return {"layouts": results}
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/auth/layout-image/{image_id}")
+async def get_layout_image(image_id: int, user: User = Depends(get_current_user)):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    db = next(get_db())
+    try:
+        img = db.query(UserImage).filter(UserImage.id == image_id, UserImage.user_id == user.id).first()
+        if img is None or not img.image_path:
+            raise HTTPException(status_code=404, detail="Image not found")
+        full_path = os.path.join(UPLOAD_DIR, img.image_path)
+        if not os.path.exists(full_path):
+            raise HTTPException(status_code=404, detail="File not found on disk")
+        from fastapi.responses import FileResponse
+        return FileResponse(full_path, media_type="image/png")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
+    init_db()
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

@@ -4,11 +4,15 @@ import React, { useState, useEffect } from 'react';
 import BlueprintUploader from '@/components/BlueprintUploader';
 import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas';
 import { GridScan } from '@/components/GridScan/GridScan';
+import { useAuth } from '@/context/AuthContext';
 
 export default function HomePage() {
+  const { user, saveLayout } = useAuth();
   const [layoutData, setLayoutData] = useState(null);
   const [activeFloor, setActiveFloor] = useState(0);
   const [uploadedImageUrl, setUploadedImageUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState(null);
 
   useEffect(() => {
     return () => {
@@ -18,6 +22,7 @@ export default function HomePage() {
 
   const handleGenerationSuccess = (data, localFile) => {
     setLayoutData(data);
+    setSavedMsg(null);
     setActiveFloor(0);
 
     setUploadedImageUrl((prev) => {
@@ -30,6 +35,24 @@ export default function HomePage() {
       setUploadedImageUrl(objectUrl);
     } else {
       setUploadedImageUrl("");
+    }
+  };
+
+  const handleSave = async () => {
+    if (!layoutData || !user) return;
+    setSaving(true);
+    setSavedMsg(null);
+    try {
+      await saveLayout(
+        `layout_${Date.now()}.json`,
+        null,
+        JSON.stringify(layoutData)
+      );
+      setSavedMsg("Saved to dashboard");
+    } catch (err) {
+      setSavedMsg("Save failed: " + err.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -73,6 +96,21 @@ export default function HomePage() {
             </div>
             <hr className="border-gray-900" />
             <BlueprintUploader onUploadSuccess={handleGenerationSuccess} />
+
+            {layoutData && user && (
+              <div className="space-y-2">
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 font-semibold py-2 rounded-xl text-xs uppercase tracking-wider transition-all disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save Layout to Dashboard"}
+                </button>
+                {savedMsg && (
+                  <p className="text-xs text-green-400 text-center">{savedMsg}</p>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="lg:col-span-7 flex flex-col h-[580px] border border-gray-800/60 rounded-2xl overflow-hidden relative shadow-2xl">

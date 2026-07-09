@@ -16,3 +16,9 @@ venv/
 env/
 __pycache__/
 *.pyc
+
+# Database config (contains credentials)
+backend/database.py
+
+# User uploaded images
+backend/user_uploads/

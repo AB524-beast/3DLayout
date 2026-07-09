@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 export default function BlueprintUploader({ onUploadSuccess }) {
   const [isDragging, setIsDragging] = useState(false);
@@ -8,6 +8,7 @@ export default function BlueprintUploader({ onUploadSuccess }) {
   const [error, setError] = useState(null);
   const [useManualInput, setUseManualInput] = useState(false); 
   const [wizardStep, setWizardStep] = useState(1);
+  const [backendOk, setBackendOk] = useState(null);
 
   const [numFloors, setNumFloors] = useState(1);
   const [targetSqFt, setTargetSqFt] = useState(1200);
@@ -15,6 +16,13 @@ export default function BlueprintUploader({ onUploadSuccess }) {
   const [roomsConfig, setRoomsConfig] = useState([]);
 
   const BACKEND_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000" ) + "/api/v1/process-layout";
+
+  useEffect(() => {
+    const base = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+    fetch(`${base}/docs`, { method: 'HEAD' })
+      .then(() => setBackendOk(true))
+      .catch(() => setBackendOk(false));
+  }, []);
 
   const initializeWizardStepTwo = () => {
     const baselineRoomSize = Math.floor((targetSqFt * 0.75) / numRooms);
@@ -73,7 +81,11 @@ export default function BlueprintUploader({ onUploadSuccess }) {
     setError(null);
     try {
       const response = await fetch(`${BACKEND_URL}/sample?floors=${numFloors}`);
-      if (!response.ok) throw new Error('No cached sample layout available on the server.');
+      if (!response.ok) {
+        let detail = '';
+        try { const e = await response.json(); detail = e.detail || ''; } catch {}
+        throw new Error(detail || `Server error (${response.status})`);
+      }
       const data = await response.json();
       if (onUploadSuccess) onUploadSuccess(data, null);
     } catch (err) {
@@ -94,11 +106,15 @@ export default function BlueprintUploader({ onUploadSuccess }) {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`${BACKEND_URL}/image?floors=${numFloors}&method=auto`, {
+      const response = await fetch(`${BACKEND_URL}/image?floors=${numFloors}`, {
         method: 'POST',
         body: formData,
       });
-      if (!response.ok) throw new Error('Backend failed to analyze blueprint image.');
+      if (!response.ok) {
+        let detail = '';
+        try { const e = await response.json(); detail = e.detail || ''; } catch {}
+        throw new Error(detail || `Server error (${response.status})`);
+      }
       const data = await response.json();
       if (onUploadSuccess) onUploadSuccess(data, file);
     } catch (err) {
@@ -118,6 +134,12 @@ export default function BlueprintUploader({ onUploadSuccess }) {
           ⚡ Guided Step Wizard
         </button>
       </div>
+
+      {backendOk === false && (
+        <div className="p-3 bg-yellow-950/40 border border-yellow-900/60 rounded-xl text-xs text-yellow-400">
+          ⚠️ Backend server not reachable. Make sure it's running at {process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000"}.
+        </div>
+      )}
 
       {!useManualInput ? (
         <div className="space-y-4">
