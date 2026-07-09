@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 import BlueprintUploader from '@/components/BlueprintUploader';
-import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas'; // 3D viewport
+import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas';
+import { GridScan } from '@/components/GridScan/GridScan';
 
 export default function HomePage() {
   const [layoutData, setLayoutData] = useState(null);
@@ -57,7 +58,22 @@ export default function HomePage() {
             <BlueprintUploader onUploadSuccess={handleGenerationSuccess} />
           </div>
 
-          <div className="lg:col-span-7 flex flex-col h-[580px] bg-gray-950/40 border border-gray-800/60 rounded-2xl overflow-hidden backdrop-blur-md relative shadow-2xl">
+          <div className="lg:col-span-7 flex flex-col h-[580px] border border-gray-800/60 rounded-2xl overflow-hidden relative shadow-2xl">
+            <GridScan
+              sensitivity={0.55}
+              lineThickness={1}
+              linesColor="#1e293b"
+              gridScale={0.1}
+              scanColor="#3b82f6"
+              scanOpacity={0.3}
+              enablePost
+              bloomIntensity={0.3}
+              chromaticAberration={0.002}
+              noiseIntensity={0.01}
+              scanDuration={3}
+              scanDelay={2}
+              scanDirection="pingpong"
+            />
             {layoutData ? (
               <>
                 <div className="absolute top-4 left-4 z-20 bg-gray-900/90 border border-gray-800 rounded-xl px-3 py-2 flex items-center gap-4 text-xs">
@@ -112,7 +128,7 @@ export default function HomePage() {
                 </div>
               </>
             ) : (
-              <div className="w-full h-full flex flex-col items-center justify-center border-2 border-dashed border-gray-900/60 rounded-2xl bg-gray-950/20 text-center p-8">
+              <div className="relative z-10 w-full h-full flex flex-col items-center justify-center border-2 border-dashed border-gray-900/60 rounded-2xl bg-gray-950/40 text-center p-8">
                 <div className="w-12 h-12 rounded-xl bg-gray-900 flex items-center justify-center border border-gray-800 text-lg mb-4">🧱</div>
                 <h3 className="text-sm font-semibold text-gray-400">Interactive 3D Viewport Matrix</h3>
                 <p className="text-xs text-gray-600 max-w-xs mt-1">
