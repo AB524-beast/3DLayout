@@ -7,7 +7,14 @@ pytesseract
 pillow
 pydantic
 
-# Database + auth (previously missing / referenced but not installed)
+# Database + auth
 sqlalchemy
 pyjwt
 passlib
+
+# OpenTelemetry tracing
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-sqlalchemy
+opentelemetry-exporter-otlp-proto-http
