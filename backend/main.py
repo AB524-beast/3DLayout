@@ -15,7 +15,7 @@ from passlib.context import CryptContext
 
 from database import init_db, get_db, User, UserImage
 import jwt
-from jwt.exceptions import JWTException as JWTError
+from jwt.exceptions import PyJWTError as JWTError
 
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
 
@@ -570,8 +570,17 @@ async def get_my_layouts(user: User = Depends(get_current_user)):
         raise HTTPException(status_code=401, detail="Not authenticated")
     db = next(get_db())
     try:
+        # Query images directly against a live session rather than reading
+        # user.images off the (detached) user object from get_current_user,
+        # which would raise DetachedInstanceError on lazy load.
+        images = (
+            db.query(UserImage)
+            .filter(UserImage.user_id == user.id)
+            .order_by(UserImage.created_at.desc())
+            .all()
+        )
         results = []
-        for img in user.images:
+        for img in images:
             results.append({
                 "id": img.id,
                 "filename": img.filename,

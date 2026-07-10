@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+numpy
+opencv-python
+pytesseract
+pillow
+pydantic
+
+# Database + auth (previously missing / referenced but not installed)
+sqlalchemy
+pyjwt
+passlib
