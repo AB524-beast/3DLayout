@@ -10,14 +10,19 @@ import math
 import json
 import os
 import base64
+import logging
 from datetime import datetime, timezone, timedelta
 from passlib.context import CryptContext
 
 from database import init_db, get_db, User, UserImage
+from tracing import setup_tracing
 import jwt
 from jwt.exceptions import PyJWTError as JWTError
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s\t%(name)s\t%(message)s")
+
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
+setup_tracing(app)
 
 app.add_middleware(
     CORSMiddleware,
