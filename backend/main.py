@@ -17,13 +17,23 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s\t%(name)s\t%(messa
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
 setup_tracing(app)
 
+ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "").split(",")
+ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS if o.strip()]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 class RoomSpecification(BaseModel):
@@ -422,4 +432,6 @@ async def process_layout_procedural(payload: ProceduralGenerationPayload):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    reload = os.environ.get("ENVIRONMENT", "development") == "development"
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)

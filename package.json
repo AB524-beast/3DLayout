@@ -1,5 +1,10 @@
 {
-  "dependencies": {
-    "@supabase/supabase-js": "^2.110.2"
+  "name": "3dlayout",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && python main.py",
+    "build": "cd frontend && npm run build",
+    "lint": "cd frontend && npm run lint"
   }
 }

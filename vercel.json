@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "rootDirectory": "frontend",
+  "rewrites": [
+    {
+      "source": "/api/backend/:path*",
+      "destination": "${BACKEND_URL}/api/v1/:path*"
+    }
+  ]
+}

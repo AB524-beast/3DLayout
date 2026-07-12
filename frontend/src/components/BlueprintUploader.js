@@ -15,12 +15,12 @@ export default function BlueprintUploader({ onUploadSuccess }) {
   const [numRooms, setNumRooms] = useState(4);
   const [roomsConfig, setRoomsConfig] = useState([]);
 
-  const BACKEND_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000" ) + "/api/v1/process-layout";
+  const BACKEND_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000") + "/api/v1/process-layout";
 
   useEffect(() => {
     const base = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
-    fetch(`${base}/docs`, { method: 'HEAD' })
-      .then(() => setBackendOk(true))
+    fetch(`${base}/health`, { method: 'GET' })
+      .then((res) => { if (res.ok) setBackendOk(true); else setBackendOk(false); })
       .catch(() => setBackendOk(false));
   }, []);
 
@@ -66,11 +66,15 @@ export default function BlueprintUploader({ onUploadSuccess }) {
           rooms: roomsConfig
         }),
       });
-      if (!response.ok) throw new Error('Procedural matrix mapping failed.');
+      if (!response.ok) {
+        let detail = '';
+        try { const e = await response.json(); detail = e.detail || ''; } catch {}
+        throw new Error(detail || `Backend error (${response.status})`);
+      }
       const data = await response.json();
       if (onUploadSuccess) onUploadSuccess(data, null);
     } catch (err) {
-      setError(err.message || 'Error processing metrics.');
+      setError(err.message || 'Error processing layout.');
     } finally {
       setIsLoading(false);
     }
@@ -137,7 +141,7 @@ export default function BlueprintUploader({ onUploadSuccess }) {
 
       {backendOk === false && (
         <div className="p-3 bg-yellow-950/40 border border-yellow-900/60 rounded-xl text-xs text-yellow-400">
-          ⚠️ Backend server not reachable. Make sure it's running at {process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000"}.
+          ⚠️ Backend server not reachable. Make sure it&apos;s running at {process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000"}.
         </div>
       )}
 
