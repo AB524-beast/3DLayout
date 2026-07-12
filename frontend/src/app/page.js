@@ -11,6 +11,7 @@ export default function HomePage() {
   const [layoutData, setLayoutData] = useState(null);
   const [activeFloor, setActiveFloor] = useState(0);
   const [uploadedImageUrl, setUploadedImageUrl] = useState("");
+  const [localFile, setLocalFile] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(null);
 
@@ -20,18 +21,19 @@ export default function HomePage() {
     };
   }, [uploadedImageUrl]);
 
-  const handleGenerationSuccess = (data, localFile) => {
+  const handleGenerationSuccess = (data, file) => {
     setLayoutData(data);
     setSavedMsg(null);
     setActiveFloor(0);
+    setLocalFile(file || null);
 
     setUploadedImageUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return "";
     });
 
-    if (localFile) {
-      const objectUrl = URL.createObjectURL(localFile);
+    if (file) {
+      const objectUrl = URL.createObjectURL(file);
       setUploadedImageUrl(objectUrl);
     } else {
       setUploadedImageUrl("");
@@ -45,7 +47,7 @@ export default function HomePage() {
     try {
       await saveLayout(
         `layout_${Date.now()}.json`,
-        null,
+        localFile,
         JSON.stringify(layoutData)
       );
       setSavedMsg("Saved to dashboard");

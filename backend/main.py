@@ -1,23 +1,16 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import numpy as np
 import cv2
 import math
 import json
 import os
-import base64
 import logging
-from datetime import datetime, timezone, timedelta
-from passlib.context import CryptContext
 
-from database import init_db, get_db, User, UserImage
 from tracing import setup_tracing
-import jwt
-from jwt.exceptions import PyJWTError as JWTError
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s\t%(name)s\t%(message)s")
 
@@ -428,193 +421,5 @@ async def process_layout_procedural(payload: ProceduralGenerationPayload):
     }
 
 
-# ── Auth / User storage ──────────────────────────────────────────────
-
-SECRET_KEY = os.environ.get("JWT_SECRET", "dev-secret-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
-
-pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-security = HTTPBearer(auto_error=False)
-
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "user_uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-
-def create_access_token(user_id: int) -> str:
-    payload = {
-        "sub": str(user_id),
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def get_current_user(
-    creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
-) -> Optional[User]:
-    if creds is None:
-        return None
-    try:
-        token = creds.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload["sub"])
-    except (JWTError, KeyError, ValueError):
-        return None
-    db = next(get_db())
-    try:
-        return db.query(User).filter(User.id == user_id).first()
-    finally:
-        db.close()
-
-
-class AuthRegisterBody(BaseModel):
-    name: str
-    email: str
-    password: str
-
-
-class AuthLoginBody(BaseModel):
-    email: str
-    password: str
-
-
-class SaveLayoutBody(BaseModel):
-    filename: str
-    image_data: Optional[str] = None
-    room_data: Optional[str] = None
-
-
-@app.on_event("startup")
-async def startup():
-    try:
-        init_db()
-    except Exception as e:
-        print(f"[DB] init error (non-fatal): {e}")
-
-
-@app.post("/api/v1/auth/register")
-async def register(body: AuthRegisterBody):
-    db = next(get_db())
-    try:
-        existing = db.query(User).filter(User.email == body.email).first()
-        if existing:
-            raise HTTPException(status_code=409, detail="Email already registered")
-        user = User(
-            name=body.name,
-            email=body.email,
-            password_hash=pwd_ctx.hash(body.password),
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        token = create_access_token(user.id)
-        return {
-            "token": token,
-            "user": {"id": user.id, "name": user.name, "email": user.email},
-        }
-    finally:
-        db.close()
-
-
-@app.post("/api/v1/auth/login")
-async def login(body: AuthLoginBody):
-    db = next(get_db())
-    try:
-        user = db.query(User).filter(User.email == body.email).first()
-        if not user or not pwd_ctx.verify(body.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        token = create_access_token(user.id)
-        return {
-            "token": token,
-            "user": {"id": user.id, "name": user.name, "email": user.email},
-        }
-    finally:
-        db.close()
-
-
-@app.get("/api/v1/auth/me")
-async def get_me(user: User = Depends(get_current_user)):
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"id": user.id, "name": user.name, "email": user.email}
-
-
-@app.post("/api/v1/auth/save-layout")
-async def save_layout(body: SaveLayoutBody, user: User = Depends(get_current_user)):
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    image_path = None
-    if body.image_data:
-        img_bytes = base64.b64decode(body.image_data)
-        safe_name = f"user_{user.id}_{int(datetime.now().timestamp())}_{body.filename}"
-        full_path = os.path.join(UPLOAD_DIR, safe_name)
-        with open(full_path, "wb") as f:
-            f.write(img_bytes)
-        image_path = safe_name
-
-    db = next(get_db())
-    try:
-        img = UserImage(
-            user_id=user.id,
-            filename=body.filename,
-            image_path=image_path,
-            room_data=body.room_data,
-        )
-        db.add(img)
-        db.commit()
-        db.refresh(img)
-        return {"id": img.id, "filename": img.filename, "created_at": img.created_at.isoformat()}
-    finally:
-        db.close()
-
-
-@app.get("/api/v1/auth/my-layouts")
-async def get_my_layouts(user: User = Depends(get_current_user)):
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    db = next(get_db())
-    try:
-        # Query images directly against a live session rather than reading
-        # user.images off the (detached) user object from get_current_user,
-        # which would raise DetachedInstanceError on lazy load.
-        images = (
-            db.query(UserImage)
-            .filter(UserImage.user_id == user.id)
-            .order_by(UserImage.created_at.desc())
-            .all()
-        )
-        results = []
-        for img in images:
-            results.append({
-                "id": img.id,
-                "filename": img.filename,
-                "room_data": json.loads(img.room_data) if img.room_data else None,
-                "created_at": img.created_at.isoformat(),
-            })
-        return {"layouts": results}
-    finally:
-        db.close()
-
-
-@app.get("/api/v1/auth/layout-image/{image_id}")
-async def get_layout_image(image_id: int, user: User = Depends(get_current_user)):
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    db = next(get_db())
-    try:
-        img = db.query(UserImage).filter(UserImage.id == image_id, UserImage.user_id == user.id).first()
-        if img is None or not img.image_path:
-            raise HTTPException(status_code=404, detail="Image not found")
-        full_path = os.path.join(UPLOAD_DIR, img.image_path)
-        if not os.path.exists(full_path):
-            raise HTTPException(status_code=404, detail="File not found on disk")
-        from fastapi.responses import FileResponse
-        return FileResponse(full_path, media_type="image/png")
-    finally:
-        db.close()
-
-
 if __name__ == "__main__":
-    init_db()
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

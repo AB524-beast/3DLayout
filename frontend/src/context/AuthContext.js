@@ -1,105 +1,105 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { supabase } from '../lib/supabaseClient';
 
 const AuthContext = createContext(null);
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
-
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
-  const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const saved = localStorage.getItem('auth_token');
-    if (saved) {
-      fetch(`${BACKEND_URL}/api/v1/auth/me`, {
-        headers: { Authorization: `Bearer ${saved}` },
-      })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((u) => {
-          if (u) { setUser(u); setToken(saved); }
-          else localStorage.removeItem('auth_token');
-        })
-        .catch(() => localStorage.removeItem('auth_token'))
-        .finally(() => setLoading(false));
-    } else {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(formatUser(session.user));
+      }
       setLoading(false);
-    }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ? formatUser(session.user) : null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const login = useCallback(async (email, password) => {
-    const resp = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || 'Login failed');
-    }
-    const data = await resp.json();
-    localStorage.setItem('auth_token', data.token);
-    setToken(data.token);
-    setUser(data.user);
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw new Error(error.message);
+    setUser(formatUser(data.user));
     return data;
   }, []);
 
   const register = useCallback(async (name, email, password) => {
-    const resp = await fetch(`${BACKEND_URL}/api/v1/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password }),
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name } },
     });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || 'Registration failed');
-    }
-    const data = await resp.json();
-    localStorage.setItem('auth_token', data.token);
-    setToken(data.token);
-    setUser(data.user);
+    if (error) throw new Error(error.message);
+    if (data.user) setUser(formatUser(data.user));
     return data;
   }, []);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem('auth_token');
-    setToken(null);
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
     setUser(null);
   }, []);
 
+  const uploadImage = useCallback(async (file) => {
+    const filePath = `avatars/${Date.now()}_${file.name}`;
+    const { error } = await supabase.storage
+      .from('user-images')
+      .upload(filePath, file);
+    if (error) throw new Error(error.message);
+    const { data: publicUrlData } = supabase.storage
+      .from('user-images')
+      .getPublicUrl(filePath);
+    return publicUrlData.publicUrl;
+  }, []);
+
   const saveLayout = useCallback(async (filename, imageData, roomData) => {
-    if (!token) throw new Error('Not authenticated');
-    const resp = await fetch(`${BACKEND_URL}/api/v1/auth/save-layout`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ filename, image_data: imageData, room_data: roomData }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || 'Save failed');
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) throw new Error('Not authenticated');
+    let imageUrl = null;
+    if (imageData instanceof File) {
+      imageUrl = await uploadImage(imageData);
     }
-    return resp.json();
-  }, [token]);
+    const { error } = await supabase.from('layouts').insert({
+      user_id: session.user.id,
+      filename,
+      image_url: imageUrl,
+      room_data: typeof roomData === 'string' ? JSON.parse(roomData) : roomData,
+    });
+    if (error) throw new Error(error.message);
+  }, [uploadImage]);
 
   const getMyLayouts = useCallback(async () => {
-    if (!token) throw new Error('Not authenticated');
-    const resp = await fetch(`${BACKEND_URL}/api/v1/auth/my-layouts`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!resp.ok) throw new Error('Failed to load layouts');
-    return resp.json();
-  }, [token]);
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return { layouts: [] };
+    const { data, error } = await supabase
+      .from('layouts')
+      .select('*')
+      .eq('user_id', session.user.id)
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    return { layouts: data || [] };
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, register, logout, saveLayout, getMyLayouts }}>
+    <AuthContext.Provider value={{ user, token: null, loading, login, register, logout, saveLayout, getMyLayouts, uploadImage }}>
       {children}
     </AuthContext.Provider>
   );
+}
+
+function formatUser(u) {
+  return {
+    id: u.id,
+    name: u.user_metadata?.name || '',
+    email: u.email,
+  };
 }
 
 export function useAuth() {

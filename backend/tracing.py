@@ -6,9 +6,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-
-from database import engine
 
 logger = logging.getLogger("tracing")
 
@@ -39,6 +36,5 @@ def setup_tracing(app) -> None:
     trace.set_tracer_provider(provider)
 
     FastAPIInstrumentor.instrument_app(app)
-    SQLAlchemyInstrumentor().instrument(engine=engine)
 
     logger.info("OpenTelemetry tracing initialized for %s", service_name)

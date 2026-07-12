@@ -10,6 +10,27 @@ export default function DashboardPage() {
   const router = useRouter();
   const [layouts, setLayouts] = useState([]);
   const [fetching, setFetching] = useState(true);
+  const [downloading, setDownloading] = useState(null);
+
+  const handleDownload = async (layout) => {
+    if (!layout.image_url) return;
+    setDownloading(layout.id);
+    try {
+      const res = await fetch(layout.image_url);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = layout.filename?.replace(/\.json$/, '.png') || 'blueprint.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+    } finally {
+      setDownloading(null);
+    }
+  };
 
   useEffect(() => {
     if (!loading && !user) {
@@ -71,6 +92,13 @@ export default function DashboardPage() {
                 key={layout.id}
                 className="bg-gray-950/60 border border-gray-800/80 rounded-2xl p-5 backdrop-blur-xl hover:border-gray-700 transition-colors"
               >
+                {layout.image_url && (
+                  <img
+                    src={layout.image_url}
+                    alt={layout.filename}
+                    className="w-full h-32 object-cover rounded-xl mb-3 border border-gray-800"
+                  />
+                )}
                 <div className="text-xs font-bold text-blue-400 mb-1">{layout.filename}</div>
                 <div className="text-[10px] text-gray-500">
                   Created: {new Date(layout.created_at).toLocaleDateString()}
@@ -79,6 +107,15 @@ export default function DashboardPage() {
                   <div className="mt-2 text-[10px] text-gray-600">
                     {layout.room_data.rooms?.length || 0} rooms
                   </div>
+                )}
+                {layout.image_url && (
+                  <button
+                    onClick={() => handleDownload(layout)}
+                    disabled={downloading === layout.id}
+                    className="mt-3 w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 font-semibold py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-all disabled:opacity-50"
+                  >
+                    {downloading === layout.id ? 'Downloading...' : 'Download Blueprint'}
+                  </button>
                 )}
               </div>
             ))}
