@@ -8,9 +8,9 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const supabase = getSupabase();
 
   useEffect(() => {
+    const supabase = getSupabase();
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         setUser(formatUser(session.user));
@@ -26,14 +26,14 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = useCallback(async (email, password) => {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await getSupabase().auth.signInWithPassword({ email, password });
     if (error) throw new Error(error.message);
     setUser(formatUser(data.user));
     return data;
   }, []);
 
   const register = useCallback(async (name, email, password) => {
-    const { data, error } = await supabase.auth.signUp({
+    const { data, error } = await getSupabase().auth.signUp({
       email,
       password,
       options: { data: { name } },
@@ -44,11 +44,12 @@ export function AuthProvider({ children }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await supabase.auth.signOut();
+    await getSupabase().auth.signOut();
     setUser(null);
   }, []);
 
   const uploadImage = useCallback(async (file) => {
+    const supabase = getSupabase();
     const filePath = `avatars/${Date.now()}_${file.name}`;
     const { error } = await supabase.storage
       .from('user-images')
@@ -61,6 +62,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const saveLayout = useCallback(async (filename, imageData, roomData) => {
+    const supabase = getSupabase();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.user) throw new Error('Not authenticated');
     let imageUrl = null;
@@ -77,6 +79,7 @@ export function AuthProvider({ children }) {
   }, [uploadImage]);
 
   const getMyLayouts = useCallback(async () => {
+    const supabase = getSupabase();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.user) return { layouts: [] };
     const { data, error } = await supabase
