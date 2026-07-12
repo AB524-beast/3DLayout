@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import BlueprintUploader from '@/components/BlueprintUploader';
 import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas';
 import { GridScan } from '@/components/GridScan/GridScan';
@@ -14,6 +14,7 @@ export default function HomePage() {
   const [localFile, setLocalFile] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(null);
+  const [threeRenderer, setThreeRenderer] = useState(null);
 
   useEffect(() => {
     return () => {
@@ -57,6 +58,35 @@ export default function HomePage() {
       setSaving(false);
     }
   };
+
+  const handleDownloadScreenshot = useCallback(() => {
+    if (!threeRenderer) return;
+    const canvas = threeRenderer.domElement;
+    const dataUrl = canvas.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `3d-layout-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, [threeRenderer]);
+
+  const handleDownloadJSON = useCallback(() => {
+    if (!layoutData) return;
+    const blob = new Blob([JSON.stringify(layoutData, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `layout-data-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [layoutData]);
+
+  const onRendererReady = useCallback((renderer) => {
+    setThreeRenderer(renderer);
+  }, []);
 
   return (
     <div className="min-h-screen bg-black text-white font-sans relative overflow-hidden">
@@ -151,22 +181,43 @@ export default function HomePage() {
                     layoutData={layoutData} 
                     activeFloor={activeFloor} 
                     imageUrl={uploadedImageUrl} 
+                    onRendererReady={onRendererReady}
                   />
                 </div>
                 
-                <div className="absolute bottom-4 left-4 right-4 max-h-24 overflow-y-auto bg-black/80 rounded-xl p-3 border border-gray-900 text-left font-mono text-[10px] text-gray-400 z-20 custom-scrollbar">
-                  <div className="text-blue-400 font-bold mb-1">{"// Active Environment Projection Streams:"}</div>
-                  {layoutData.rooms?.map((rm, i) => {
-                    const computedArea = typeof rm.area === 'number' 
-                      ? rm.area.toFixed(1) 
-                      : parseFloat(rm.area || 0).toFixed(1);
+                <div className="absolute bottom-4 left-4 right-4 flex items-end gap-2 z-20">
+                  <div className="flex-1 max-h-24 overflow-y-auto bg-black/80 rounded-xl p-3 border border-gray-900 text-left font-mono text-[10px] text-gray-400 custom-scrollbar">
+                    <div className="text-blue-400 font-bold mb-1">{"// Active Environment Projection Streams:"}</div>
+                    {layoutData.rooms?.map((rm, i) => {
+                      const computedArea = typeof rm.area === 'number' 
+                        ? rm.area.toFixed(1) 
+                        : parseFloat(rm.area || 0).toFixed(1);
 
-                    return (
-                      <div key={i} className="truncate">
-                        {`-> Mounted Layer: "${rm.label || `Room ${i + 1}`}" | Dimensions: ${rm.dimensions || 'Dynamic'} | Area: ${computedArea}m²`}
-                      </div>
-                    );
-                  })}
+                      return (
+                        <div key={i} className="truncate">
+                          {`-> Mounted Layer: "${rm.label || `Room ${i + 1}`}" | Dimensions: ${rm.dimensions || 'Dynamic'} | Area: ${computedArea}m²`}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-col gap-1.5 shrink-0">
+                    <button
+                      onClick={handleDownloadScreenshot}
+                      disabled={!threeRenderer}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-40 whitespace-nowrap"
+                      title="Download 3D viewport as PNG"
+                    >
+                      📷 Screenshot
+                    </button>
+                    <button
+                      onClick={handleDownloadJSON}
+                      disabled={!layoutData}
+                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-40 whitespace-nowrap"
+                      title="Download layout data as JSON"
+                    >
+                      📥 JSON
+                    </button>
+                  </div>
                 </div>
               </>
             ) : (

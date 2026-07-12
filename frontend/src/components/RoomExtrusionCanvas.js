@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
@@ -12,10 +12,12 @@ export default function RoomExtrusionCanvas({
   layoutData,
   activeFloor = 0,
   imageUrl = "",
+  onRendererReady,
 }) {
   const containerRef = useRef(null);
+  const rendererRef = useRef(null);
 
-  const rooms = layoutData?.rooms || [];
+  const rooms = useMemo(() => layoutData?.rooms || [], [layoutData]);
   const totalFloors = layoutData?.totalFloors || 1;
 
   const floorFilter = useMemo(() => {
@@ -40,10 +42,13 @@ export default function RoomExtrusionCanvas({
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
     camera.position.set(0, 16, 16);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setSize(width, height);
     containerRef.current.innerHTML = '';
     containerRef.current.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    if (onRendererReady) onRendererReady(renderer);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -59,20 +64,11 @@ export default function RoomExtrusionCanvas({
 
     const wallHeight = 2.4;
     const wallThickness = 0.15;
-    // Minimum wall length to render. Raw traced polygons contain tiny
-    // pixel-level "staircase" teeth (often < 0.2m) that create overlapping,
-    // blobby geometry when each one is extruded as its own box. Anything
-    // shorter than this is noise, not a real wall.
     const MIN_WALL_LENGTH = 0.3;
-    // Segments whose direction differs by less than this (radians) are
-    // treated as collinear and merged into one continuous wall.
     const COLLINEAR_ANGLE_EPS = 0.06;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.2 });
     const openMat = new THREE.MeshStandardMaterial({ color: 0x10b981, transparent: true, opacity: 0.35 });
 
-    // Merge consecutive collinear/near-duplicate wall segments into single
-    // straight runs before rendering, so a jagged traced outline collapses
-    // into clean walls instead of many overlapping short boxes.
     const mergeCollinearWalls = (walls) => {
       if (!walls || walls.length === 0) return [];
 
@@ -90,7 +86,6 @@ export default function RoomExtrusionCanvas({
           Math.hypot(w.x1 - current.x2, w.y1 - current.y2) < 0.05;
 
         if (touchesEnd && angleDiff < COLLINEAR_ANGLE_EPS) {
-          // Extend the current run instead of starting a new wall
           current.x2 = w.x2;
           current.y2 = w.y2;
         } else {
@@ -114,7 +109,6 @@ export default function RoomExtrusionCanvas({
           const length = Math.hypot(dx, dy);
           if (length < MIN_WALL_LENGTH) return;
 
-          // Trace edge as a vertical box (extrusion)
           const geo = new THREE.BoxGeometry(length, wallHeight, wallThickness);
           const mesh = new THREE.Mesh(geo, room.isOpenSpace ? openMat : wallMat);
 
@@ -140,7 +134,6 @@ export default function RoomExtrusionCanvas({
         const img = texture.image;
         const aspect = img.width / img.height;
 
-        // Mirror existing behavior of FloorPlanCanvas
         const planeHeight = 14.0;
         const planeWidth = planeHeight * aspect;
 
@@ -186,8 +179,10 @@ export default function RoomExtrusionCanvas({
       window.removeEventListener('resize', handleResize);
       controls.dispose();
       renderer.dispose();
+      rendererRef.current = null;
+      if (onRendererReady) onRendererReady(null);
     };
-  }, [layoutData, activeFloor, imageUrl, rooms, floorFilter]);
+  }, [layoutData, activeFloor, imageUrl, rooms, floorFilter, onRendererReady]);
 
   return <div ref={containerRef} className="w-full h-full min-h-[500px]" />;
 }
