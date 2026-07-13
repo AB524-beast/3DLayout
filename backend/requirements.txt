@@ -6,6 +6,7 @@ opencv-python-headless
 pytesseract
 pillow
 pydantic
+supabase
 
 # OpenTelemetry tracing
 opentelemetry-api

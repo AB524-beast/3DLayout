@@ -1,8 +1,8 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import numpy as np
 import cv2
 import math
@@ -11,6 +11,7 @@ import os
 import logging
 
 from tracing import setup_tracing
+from database import save_project, save_rooms
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s\t%(name)s\t%(message)s")
 
@@ -443,6 +444,36 @@ async def process_layout_procedural(payload: ProceduralGenerationPayload):
         "totalRooms": len(rooms_output),
         "totalFloors": payload.total_floors,
         "calculatedSqFt": payload.total_sq_ft,
+    }
+
+
+class SaveLayoutRequest(BaseModel):
+    name: str = "Untitled Layout"
+    image_url: Optional[str] = None
+    total_floors: int = 1
+    rooms: List[Dict[str, Any]]
+
+
+@app.post("/api/v1/projects")
+async def create_project(payload: SaveLayoutRequest, authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    token = authorization.replace("Bearer ", "")
+    try:
+        from database import get_supabase
+        sb = get_supabase()
+        user = sb.auth.get_user(token)
+        user_id = user.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    project = save_project(user_id, payload.name, payload.image_url, payload.total_floors)
+    saved_rooms = save_rooms(project["id"], payload.rooms)
+
+    return {
+        "project": project,
+        "rooms": saved_rooms,
     }
 
 
