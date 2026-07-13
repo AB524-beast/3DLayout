@@ -92,37 +92,52 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
     _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # ---- Step 2: remove small dark components (text) ----------
-    # Text characters are small isolated dark blobs.  Connected-component
-    # filtering with a generous size threshold kills them while keeping
-    # wall lines (which are long/stretched and belong to larger components
-    # or chain into other wall components).
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
     walls = np.zeros_like(dark)
     if num_labels > 1:
         for i in range(1, num_labels):
             if stats[i, cv2.CC_STAT_AREA] >= min_wall_area_px:
                 walls[labels == i] = 255
-
-    # If filtering removed everything fall back to the original.
     if cv2.countNonZero(walls) < total_px * 0.01:
         walls = dark
 
-    # ---- Step 3: close gaps in walls ---------------------------
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-    walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=3)
+    # ---- Step 3: close small gaps (doorway/dash breaks) --------
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=2)
 
-    # ---- Step 4: thicken walls so narrow passages close --------
-    dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    walls = cv2.dilate(walls, dilate_k, iterations=3)
-
-    # ---- Step 5: rooms = white regions = inverted walls --------
+    # ---- Step 4: room space = inverse of walls, denoised -------
     rooms_bin = cv2.bitwise_not(walls)
+    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
 
-    # ---- Step 6: find contours of white regions ---------------
-    cnts, _ = cv2.findContours(rooms_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # ---- Step 5: distance transform ----------------------------
+    dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
+    dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
 
+    # ---- Step 6: seed markers from confident room interiors -----
+    _, sure_fg = cv2.threshold(dist_norm, 0.35, 1.0, cv2.THRESH_BINARY)
+    sure_fg = (sure_fg * 255).astype(np.uint8)
+
+    num_markers, markers = cv2.connectedComponents(sure_fg)
+    if num_markers <= 1:
+        return []
+
+    markers = markers + 1
+    unknown = cv2.subtract(rooms_bin, sure_fg)
+    markers[unknown == 255] = 0
+
+    # ---- Step 7: watershed grows each seed to the true boundary --
+    img_for_ws = cv2.cvtColor(rooms_bin, cv2.COLOR_GRAY2BGR)
+    cv2.watershed(img_for_ws, markers)
+
+    # ---- Step 8: convert each watershed region into a room polygon ----
     rooms = []
-    for cnt in cnts:
+    for label in range(2, markers.max() + 1):
+        mask = np.uint8(markers == label) * 255
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        cnt = max(cnts, key=cv2.contourArea)
         area = cv2.contourArea(cnt)
         if area < min_room_area_px:
             continue
