@@ -31,6 +31,11 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root():
+    return {"status": "running", "service": "3d-layout-backend"}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
