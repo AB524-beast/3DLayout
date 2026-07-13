@@ -25,6 +25,9 @@ if not ALLOWED_ORIGINS:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    # Matches your production domain AND any Vercel preview deploy
+    # (e.g. https://3-d-layout-37k8.vercel.app, https://3-d-layout-git-main-you.vercel.app, etc.)
+    allow_origin_regex=r"https://3-d-layout(-[a-z0-9]+)*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
