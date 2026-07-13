@@ -17,18 +17,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s\t%(name)s\t%(messa
 app = FastAPI(title="Orthogonal Blueprint Spatial Modeler")
 setup_tracing(app)
 
-ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "").split(",")
-ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS if o.strip()]
-if not ALLOWED_ORIGINS:
-    ALLOWED_ORIGINS = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    # Matches your production domain AND any Vercel preview deploy
-    # (e.g. https://3-d-layout-37k8.vercel.app, https://3-d-layout-git-main-you.vercel.app, etc.)
-    allow_origin_regex=r"https://3-d-layout(-[a-z0-9]+)*\.vercel\.app",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
