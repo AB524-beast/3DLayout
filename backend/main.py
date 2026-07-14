@@ -117,6 +117,24 @@ def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
     return wall_mask
 
 
+def _remove_border_region(rooms_bin: np.ndarray) -> np.ndarray:
+    h, w = rooms_bin.shape
+    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+    filled = rooms_bin.copy()
+
+    seeds = [
+        (0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1),
+        (0, w // 2), (h - 1, w // 2), (h // 2, 0), (h // 2, w - 1),
+    ]
+    for (sy, sx) in seeds:
+        if filled[sy, sx] == 255:
+            cv2.floodFill(filled, flood_mask, (sx, sy), 128)
+
+    result = rooms_bin.copy()
+    result[filled == 128] = 0
+    return result
+
+
 def _segment_rooms(gray: np.ndarray, w: int, h: int,
                    px_to_meter: float) -> List[Dict[str, Any]]:
     total_px = w * h
@@ -144,6 +162,11 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
     rooms_bin = cv2.bitwise_not(walls)
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
+
+    # ---- Step 3b: strip out the border/margin region -------------
+    # Whatever open space touches the edge of the photo is the page
+    # margin or scan background, never an actual room.
+    rooms_bin = _remove_border_region(rooms_bin)
 
     # ---- Step 4: distance transform + watershed seeding --------
     dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
@@ -181,6 +204,14 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
         approx_pts = approx.reshape(-1, 2)
         snapped = _snap_orthogonal(approx_pts)
         approx = snapped.reshape(-1, 1, 2)
+
+        # Reject any polygon that touches the literal edge of the image
+        xs_px = [int(pt[0][0]) for pt in approx]
+        ys_px = [int(pt[0][1]) for pt in approx]
+        edge_margin = 3
+        if (min(xs_px) <= edge_margin or min(ys_px) <= edge_margin or
+                max(xs_px) >= w - edge_margin or max(ys_px) >= h - edge_margin):
+            continue
 
         pts_m = []
         for point in approx:
