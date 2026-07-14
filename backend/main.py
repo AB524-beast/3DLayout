@@ -78,39 +78,76 @@ def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
     return snapped.astype(np.int32)
 
 
+def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
+    total_px = w * h
+
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+    min_line_len = max(20, int(math.sqrt(total_px) * 0.03))
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=40,
+        minLineLength=min_line_len,
+        maxLineGap=15,
+    )
+
+    wall_mask = np.zeros((h, w), dtype=np.uint8)
+    if lines is None:
+        return wall_mask
+
+    ANGLE_TOL_DEG = 10.0
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx, dy = x2 - x1, y2 - y1
+        angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+        is_horizontal = angle < ANGLE_TOL_DEG
+        is_vertical = angle > 90 - ANGLE_TOL_DEG
+        if not (is_horizontal or is_vertical):
+            continue
+
+        if is_horizontal:
+            y2 = y1
+        else:
+            x2 = x1
+
+        cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=4)
+
+    return wall_mask
+
+
 def _segment_rooms(gray: np.ndarray, w: int, h: int,
                    px_to_meter: float) -> List[Dict[str, Any]]:
     total_px = w * h
     min_room_area_px = total_px * 0.008
-    min_wall_area_px = total_px * 0.003
 
-    # ---- Step 1: binary threshold (walls + text = dark) ----
-    _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # ---- Step 1: detect actual straight wall lines only --------
+    walls = _detect_wall_lines(gray, w, h)
 
-    # ---- Step 2: remove small dark components (text) ----------
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
-    walls = np.zeros_like(dark)
-    if num_labels > 1:
+    # Fallback: if too few wall lines were found, fall back to the
+    # old threshold-based wall mask rather than returning nothing.
+    if cv2.countNonZero(walls) < total_px * 0.005:
+        _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+        fallback = np.zeros_like(dark)
         for i in range(1, num_labels):
-            if stats[i, cv2.CC_STAT_AREA] >= min_wall_area_px:
-                walls[labels == i] = 255
-    if cv2.countNonZero(walls) < total_px * 0.01:
-        walls = dark
+            if stats[i, cv2.CC_STAT_AREA] >= total_px * 0.003:
+                fallback[labels == i] = 255
+        walls = fallback
 
-    # ---- Step 3: close small gaps (doorway/dash breaks) --------
+    # ---- Step 2: bridge doorway gaps ---------------------------
     close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=2)
 
-    # ---- Step 4: room space = inverse of walls, denoised -------
+    # ---- Step 3: room space = inverse of walls, denoised -------
     rooms_bin = cv2.bitwise_not(walls)
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
 
-    # ---- Step 5: distance transform ----------------------------
+    # ---- Step 4: distance transform + watershed seeding --------
     dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-
-    # ---- Step 6: seed markers from confident room interiors -----
     _, sure_fg = cv2.threshold(dist_norm, 0.35, 1.0, cv2.THRESH_BINARY)
     sure_fg = (sure_fg * 255).astype(np.uint8)
 
@@ -122,11 +159,10 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
     unknown = cv2.subtract(rooms_bin, sure_fg)
     markers[unknown == 255] = 0
 
-    # ---- Step 7: watershed grows each seed to the true boundary --
     img_for_ws = cv2.cvtColor(rooms_bin, cv2.COLOR_GRAY2BGR)
     cv2.watershed(img_for_ws, markers)
 
-    # ---- Step 8: convert each watershed region into a room polygon ----
+    # ---- Step 5: convert each watershed region into room polygon ----
     rooms = []
     for label in range(2, markers.max() + 1):
         mask = np.uint8(markers == label) * 255
