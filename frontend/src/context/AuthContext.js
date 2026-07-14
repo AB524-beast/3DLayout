@@ -78,6 +78,31 @@ export function AuthProvider({ children }) {
     if (error) throw new Error(error.message);
   }, [uploadImage]);
 
+  const deleteLayout = useCallback(async (layoutId) => {
+    const supabase = getSupabase();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) throw new Error('Not authenticated');
+    const { data: layout, error: fetchError } = await supabase
+      .from('layouts')
+      .select('image_url')
+      .eq('id', layoutId)
+      .eq('user_id', session.user.id)
+      .single();
+    if (fetchError) throw new Error(fetchError.message);
+    if (layout?.image_url) {
+      const path = layout.image_url.split('/user-images/')[1];
+      if (path) {
+        await supabase.storage.from('user-images').remove([path]);
+      }
+    }
+    const { error } = await supabase
+      .from('layouts')
+      .delete()
+      .eq('id', layoutId)
+      .eq('user_id', session.user.id);
+    if (error) throw new Error(error.message);
+  }, []);
+
   const getMyLayouts = useCallback(async () => {
     const supabase = getSupabase();
     const { data: { session } } = await supabase.auth.getSession();
@@ -92,7 +117,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token: null, loading, login, register, logout, saveLayout, getMyLayouts, uploadImage }}>
+    <AuthContext.Provider value={{ user, token: null, loading, login, register, logout, saveLayout, deleteLayout, getMyLayouts, uploadImage }}>
       {children}
     </AuthContext.Provider>
   );

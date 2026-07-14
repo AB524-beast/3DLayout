@@ -6,11 +6,12 @@ import Link from 'next/link';
 import { useAuth } from '../../context/AuthContext';
 
 export default function DashboardPage() {
-  const { user, loading, getMyLayouts } = useAuth();
+  const { user, loading, getMyLayouts, deleteLayout } = useAuth();
   const router = useRouter();
   const [layouts, setLayouts] = useState([]);
   const [fetching, setFetching] = useState(true);
   const [downloading, setDownloading] = useState(null);
+  const [deleting, setDeleting] = useState(null);
 
   const handleDownload = async (layout) => {
     if (!layout.image_url) return;
@@ -29,6 +30,19 @@ export default function DashboardPage() {
     } catch {
     } finally {
       setDownloading(null);
+    }
+  };
+
+  const handleDelete = async (layoutId) => {
+    if (!confirm('Delete this layout permanently?')) return;
+    setDeleting(layoutId);
+    try {
+      await deleteLayout(layoutId);
+      setLayouts((prev) => prev.filter((l) => l.id !== layoutId));
+    } catch (err) {
+      alert('Delete failed: ' + err.message);
+    } finally {
+      setDeleting(null);
     }
   };
 
@@ -117,6 +131,13 @@ export default function DashboardPage() {
                     {downloading === layout.id ? 'Downloading...' : 'Download Blueprint'}
                   </button>
                 )}
+                <button
+                  onClick={() => handleDelete(layout.id)}
+                  disabled={deleting === layout.id}
+                  className="mt-2 w-full bg-red-950/50 hover:bg-red-950 border border-red-900/60 text-red-400 font-semibold py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-all disabled:opacity-50"
+                >
+                  {deleting === layout.id ? 'Deleting...' : 'Delete'}
+                </button>
               </div>
             ))}
           </div>
