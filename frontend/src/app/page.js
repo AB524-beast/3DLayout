@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import BlueprintUploader from '@/components/BlueprintUploader';
 import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas';
 import { GridScan } from '@/components/GridScan/GridScan';
@@ -124,7 +125,7 @@ export default function HomePage() {
           <div className="lg:col-span-5 bg-gray-950/60 border border-gray-800/80 rounded-2xl p-6 backdrop-blur-xl shadow-2xl space-y-6">
             <div>
               <h2 className="text-base font-bold text-gray-200">Layout Specifications</h2>
-              <p className="text-xs text-gray-500">Upload an image schematic or build spaces step-by-step.</p>
+              <p className="text-xs text-gray-500">Upload an image schematic to extract and visualize your layout in 3D.</p>
             </div>
             <hr className="border-gray-900" />
             <BlueprintUploader onUploadSuccess={handleGenerationSuccess} />
@@ -217,6 +218,12 @@ export default function HomePage() {
                     >
                       📥 JSON
                     </button>
+                    <Link
+                      href="/dashboard"
+                      className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-bold uppercase rounded-lg transition-all whitespace-nowrap text-center"
+                    >
+                      ← Dashboard
+                    </Link>
                   </div>
                 </div>
               </>
@@ -225,7 +232,7 @@ export default function HomePage() {
                 <div className="w-12 h-12 rounded-xl bg-gray-900 flex items-center justify-center border border-gray-800 text-lg mb-4">🧱</div>
                 <h3 className="text-sm font-semibold text-gray-400">Interactive 3D Viewport Matrix</h3>
                 <p className="text-xs text-gray-600 max-w-xs mt-1">
-                  Upload an image schematic layout or execute a procedural configuration wizard stack to look at your model.
+                  Upload an image schematic layout to generate your 3D model.
                 </p>
               </div>
             )}
