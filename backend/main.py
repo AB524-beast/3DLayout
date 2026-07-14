@@ -99,7 +99,10 @@ def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
 
     ANGLE_TOL_DEG = 10.0
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        coords = np.asarray(line).reshape(-1)
+        if coords.size < 4:
+            continue
+        x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
         dx, dy = x2 - x1, y2 - y1
         angle = math.degrees(math.atan2(abs(dy), abs(dx)))
         is_horizontal = angle < ANGLE_TOL_DEG
