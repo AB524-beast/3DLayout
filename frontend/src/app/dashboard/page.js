@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { GridScan } from '@/components/GridScan/GridScan';
 import { useAuth } from '../../context/AuthContext';
 
 export default function DashboardPage() {
@@ -68,7 +69,24 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white font-sans relative">
+    <div className="min-h-screen bg-black text-white font-sans relative overflow-hidden">
+      <div className="absolute inset-0 pointer-events-none">
+        <GridScan
+          sensitivity={0.55}
+          lineThickness={1}
+          linesColor="#1e293b"
+          gridScale={0.1}
+          scanColor="#3b82f6"
+          scanOpacity={0.3}
+          enablePost
+          bloomIntensity={0.3}
+          chromaticAberration={0.002}
+          noiseIntensity={0.01}
+          scanDuration={3}
+          scanDelay={2}
+          scanDirection="pingpong"
+        />
+      </div>
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#0f172a_1px,transparent_1px),linear-gradient(to_bottom,#0f172a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] pointer-events-none" />
 
       <div className="relative max-w-5xl mx-auto px-6 py-12">
