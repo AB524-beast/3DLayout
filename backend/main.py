@@ -79,18 +79,15 @@ def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
 
 
 def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
+    edges = cv2.Canny(gray, 30, 100, apertureSize=3)
+
     total_px = w * h
-
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-    min_line_len = max(20, int(math.sqrt(total_px) * 0.03))
+    min_line_len = max(15, int(math.sqrt(total_px) * 0.02))
     lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi / 180,
-        threshold=40,
+        edges, rho=1, theta=np.pi / 180,
+        threshold=25,
         minLineLength=min_line_len,
-        maxLineGap=15,
+        maxLineGap=20,
     )
 
     wall_mask = np.zeros((h, w), dtype=np.uint8)
@@ -109,12 +106,10 @@ def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
         is_vertical = angle > 90 - ANGLE_TOL_DEG
         if not (is_horizontal or is_vertical):
             continue
-
         if is_horizontal:
             y2 = y1
         else:
             x2 = x1
-
         cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=4)
 
     return wall_mask
@@ -142,36 +137,37 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
                    px_to_meter: float) -> List[Dict[str, Any]]:
     total_px = w * h
     min_room_area_px = total_px * 0.008
+    min_wall_area_px = total_px * 0.003
 
-    # ---- Step 1: detect actual straight wall lines only --------
-    walls = _detect_wall_lines(gray, w, h)
+    # ---- Wall mask A: straight-line detection (clean but can miss faint walls)
+    hough_walls = _detect_wall_lines(gray, w, h)
 
-    # Fallback: if too few wall lines were found, fall back to the
-    # old threshold-based wall mask rather than returning nothing.
-    if cv2.countNonZero(walls) < total_px * 0.005:
-        _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
-        fallback = np.zeros_like(dark)
-        for i in range(1, num_labels):
-            if stats[i, cv2.CC_STAT_AREA] >= total_px * 0.003:
-                fallback[labels == i] = 255
-        walls = fallback
+    # ---- Wall mask B: threshold-based (catches faint/gray walls Hough misses)
+    _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    thresh_walls = np.zeros_like(dark)
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] >= min_wall_area_px:
+            thresh_walls[labels == i] = 255
 
-    # ---- Step 2: bridge doorway gaps ---------------------------
+    # ---- Combine: a pixel counts as wall if EITHER method found it -----
+    walls = cv2.bitwise_or(hough_walls, thresh_walls)
+    if cv2.countNonZero(walls) < total_px * 0.01:
+        walls = dark
+
+    # ---- Bridge doorway gaps -----------------------------------
     close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=2)
 
-    # ---- Step 3: room space = inverse of walls, denoised -------
+    # ---- Room space = inverse of walls, denoised ----------------
     rooms_bin = cv2.bitwise_not(walls)
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
 
-    # ---- Step 3b: strip out the border/margin region -------------
-    # Whatever open space touches the edge of the photo is the page
-    # margin or scan background, never an actual room.
+    # ---- Strip border/margin region ------------------------------
     rooms_bin = _remove_border_region(rooms_bin)
 
-    # ---- Step 4: distance transform + watershed seeding --------
+    # ---- Distance transform + watershed seeding ------------------
     dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
     _, sure_fg = cv2.threshold(dist_norm, 0.35, 1.0, cv2.THRESH_BINARY)
@@ -188,7 +184,6 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
     img_for_ws = cv2.cvtColor(rooms_bin, cv2.COLOR_GRAY2BGR)
     cv2.watershed(img_for_ws, markers)
 
-    # ---- Step 5: convert each watershed region into room polygon ----
     rooms = []
     for label in range(2, markers.max() + 1):
         mask = np.uint8(markers == label) * 255
@@ -208,7 +203,6 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
         snapped = _snap_orthogonal(approx_pts)
         approx = snapped.reshape(-1, 1, 2)
 
-        # Reject any polygon that touches the literal edge of the image
         xs_px = [int(pt[0][0]) for pt in approx]
         ys_px = [int(pt[0][1]) for pt in approx]
         edge_margin = 3
