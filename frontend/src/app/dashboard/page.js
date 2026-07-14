@@ -72,21 +72,21 @@ export default function DashboardPage() {
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#0f172a_1px,transparent_1px),linear-gradient(to_bottom,#0f172a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] pointer-events-none" />
 
       <div className="relative max-w-5xl mx-auto px-6 py-12">
-        <div className="flex items-center justify-between mb-8">
+        <div className="flex items-center justify-between mb-8 animate-slide-up">
           <div>
             <h1 className="text-2xl font-extrabold tracking-tight">Dashboard</h1>
             <p className="text-sm text-gray-500 mt-1">Welcome back, {user?.name}</p>
           </div>
           <Link
             href="/"
-            className="text-xs font-semibold bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl transition-colors"
+            className="text-xs font-semibold bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl transition-all hover:scale-105 active:scale-95"
           >
             + New Layout
           </Link>
         </div>
 
         {layouts.length === 0 ? (
-          <div className="border-2 border-dashed border-gray-900/60 rounded-2xl bg-gray-950/40 text-center p-16">
+          <div className="border-2 border-dashed border-gray-900/60 rounded-2xl bg-gray-950/40 text-center p-16 animate-scale-in">
             <div className="w-12 h-12 rounded-xl bg-gray-900 flex items-center justify-center border border-gray-800 text-lg mx-auto mb-4">🏗️</div>
             <h3 className="text-sm font-semibold text-gray-400">No saved layouts yet</h3>
             <p className="text-xs text-gray-600 mt-1 max-w-xs mx-auto">
@@ -94,23 +94,24 @@ export default function DashboardPage() {
             </p>
             <Link
               href="/"
-              className="inline-block mt-4 text-xs font-semibold bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl transition-colors"
+              className="inline-block mt-4 text-xs font-semibold bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl transition-all hover:scale-105 active:scale-95"
             >
               Go to Home
             </Link>
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {layouts.map((layout) => (
+            {layouts.map((layout, index) => (
               <div
                 key={layout.id}
-                className="bg-gray-950/60 border border-gray-800/80 rounded-2xl p-5 backdrop-blur-xl hover:border-gray-700 transition-colors"
+                className="bg-gray-950/60 border border-gray-800/80 rounded-2xl p-5 backdrop-blur-xl hover:border-gray-700 transition-all duration-300 hover:shadow-lg hover:shadow-blue-500/5 animate-slide-up"
+                style={{ animationDelay: `${index * 60}ms` }}
               >
                 {layout.image_url && (
                   <img
                     src={layout.image_url}
                     alt={layout.filename}
-                    className="w-full h-32 object-cover rounded-xl mb-3 border border-gray-800"
+                    className="w-full h-32 object-cover rounded-xl mb-3 border border-gray-800 transition-transform duration-300 hover:scale-[1.02]"
                   />
                 )}
                 <div className="text-xs font-bold text-blue-400 mb-1">{layout.filename}</div>
@@ -126,7 +127,7 @@ export default function DashboardPage() {
                   <button
                     onClick={() => handleDownload(layout)}
                     disabled={downloading === layout.id}
-                    className="mt-3 w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 font-semibold py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-all disabled:opacity-50"
+                    className="mt-3 w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 font-semibold py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-all duration-200 disabled:opacity-50 hover:scale-[1.02] active:scale-95"
                   >
                     {downloading === layout.id ? 'Downloading...' : 'Download Blueprint'}
                   </button>
@@ -134,7 +135,7 @@ export default function DashboardPage() {
                 <button
                   onClick={() => handleDelete(layout.id)}
                   disabled={deleting === layout.id}
-                  className="mt-2 w-full bg-red-950/50 hover:bg-red-950 border border-red-900/60 text-red-400 font-semibold py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-all disabled:opacity-50"
+                  className="mt-2 w-full bg-red-950/50 hover:bg-red-950 border border-red-900/60 text-red-400 font-semibold py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-all duration-200 disabled:opacity-50 hover:scale-[1.02] active:scale-95"
                 >
                   {deleting === layout.id ? 'Deleting...' : 'Delete'}
                 </button>
