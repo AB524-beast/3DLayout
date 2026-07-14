@@ -103,7 +103,7 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
 
     # ---- Step 4: room space = inverse of walls, denoised -------
     rooms_bin = cv2.bitwise_not(walls)
-    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
 
     # ---- Step 5: distance transform ----------------------------
@@ -138,7 +138,7 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
         if area < min_room_area_px:
             continue
 
-        epsilon = 0.015 * cv2.arcLength(cnt, True)
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, True)
         if len(approx) < 4:
             continue
@@ -162,6 +162,11 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
         min_side = min(bb_w, bb_h)
         max_side = max(bb_w, bb_h)
         if max_side > 0 and min_side / max_side < 0.15:
+            continue
+
+        img_w_m = w / px_to_meter
+        img_h_m = h / px_to_meter
+        if bb_w > img_w_m * 0.85 and bb_h > img_h_m * 0.85:
             continue
 
         rooms.append({
