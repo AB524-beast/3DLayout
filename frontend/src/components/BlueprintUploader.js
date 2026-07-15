@@ -13,9 +13,25 @@ export default function BlueprintUploader({ onUploadSuccess }) {
 
   useEffect(() => {
     const base = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
-    fetch(`${base}/health`, { method: 'GET' })
-      .then((res) => { if (res.ok) setBackendOk(true); else setBackendOk(false); })
-      .catch(() => setBackendOk(false));
+    let cancelled = false;
+
+    const checkHealth = async (attempt = 1) => {
+      try {
+        const res = await fetch(`${base}/health`, { method: 'GET' });
+        if (!cancelled) setBackendOk(res.ok);
+        if (!res.ok && attempt < 5 && !cancelled) {
+          setTimeout(() => checkHealth(attempt + 1), attempt * 3000);
+        }
+      } catch {
+        if (!cancelled) setBackendOk(false);
+        if (attempt < 5 && !cancelled) {
+          setTimeout(() => checkHealth(attempt + 1), attempt * 3000);
+        }
+      }
+    };
+
+    checkHealth();
+    return () => { cancelled = true; };
   }, []);
 
   const loadSampleLayout = async () => {
