@@ -172,49 +172,70 @@ def _remove_border_region(rooms_bin: np.ndarray) -> np.ndarray:
     return result
 
 
-def _segment_rooms(gray: np.ndarray, w: int, h: int,
-                   px_to_meter: float) -> List[Dict[str, Any]]:
+def _build_wall_mask(gray: np.ndarray, w: int, h: int,
+                     canny_low: int, canny_high: int,
+                     hough_thresh: int, min_wall_frac: float) -> np.ndarray:
     total_px = w * h
-    min_room_area_px = total_px * 0.008
-    min_wall_area_px = total_px * 0.003
 
-    # ---- Wall mask A: straight-line detection (clean but can miss faint walls)
-    hough_walls = _detect_wall_lines(gray, w, h)
+    edges = cv2.Canny(gray, canny_low, canny_high, apertureSize=3)
+    min_line_len = max(15, int(math.sqrt(total_px) * 0.02))
+    lines = cv2.HoughLinesP(
+        edges, rho=1, theta=np.pi / 180,
+        threshold=hough_thresh, minLineLength=min_line_len, maxLineGap=20,
+    )
 
-    # ---- Wall mask B: threshold-based (catches faint/gray walls Hough misses)
+    hough_walls = np.zeros((h, w), dtype=np.uint8)
+    ANGLE_TOL_DEG = 10.0
+    if lines is not None:
+        for line in lines:
+            coords = np.asarray(line).reshape(-1)
+            if coords.size < 4:
+                continue
+            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+            dx, dy = x2 - x1, y2 - y1
+            angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+            is_h = angle < ANGLE_TOL_DEG
+            is_v = angle > 90 - ANGLE_TOL_DEG
+            if not (is_h or is_v):
+                continue
+            if is_h:
+                y2 = y1
+            else:
+                x2 = x1
+            cv2.line(hough_walls, (x1, y1), (x2, y2), 255, thickness=4)
+
     _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
     thresh_walls = np.zeros_like(dark)
+    min_wall_area_px = total_px * min_wall_frac
     for i in range(1, num_labels):
         if stats[i, cv2.CC_STAT_AREA] >= min_wall_area_px:
             thresh_walls[labels == i] = 255
 
-    # ---- Combine: a pixel counts as wall if EITHER method found it -----
     walls = cv2.bitwise_or(hough_walls, thresh_walls)
     if cv2.countNonZero(walls) < total_px * 0.01:
         walls = dark
+    return walls
 
-    # ---- Bridge doorway gaps -----------------------------------
+
+def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
+                          px_to_meter: float, min_room_area_px: float,
+                          dist_thresh: float) -> List[Dict[str, Any]]:
     close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=2)
 
-    # ---- Room space = inverse of walls, denoised ----------------
     rooms_bin = cv2.bitwise_not(walls)
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
-
-    # ---- Strip border/margin region ------------------------------
     rooms_bin = _remove_border_region(rooms_bin)
 
-    # ---- Smooth boundary jitter from combining two wall masks -----
     smooth_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_CLOSE, smooth_k, iterations=1)
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, smooth_k, iterations=1)
 
-    # ---- Distance transform + watershed seeding ------------------
     dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-    _, sure_fg = cv2.threshold(dist_norm, 0.35, 1.0, cv2.THRESH_BINARY)
+    _, sure_fg = cv2.threshold(dist_norm, dist_thresh, 1.0, cv2.THRESH_BINARY)
     sure_fg = (sure_fg * 255).astype(np.uint8)
 
     num_markers, markers = cv2.connectedComponents(sure_fg)
@@ -240,7 +261,7 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
             continue
 
         rect = cv2.minAreaRect(cnt)
-        (rect_cx, rect_cy), (rect_w, rect_h), rect_angle = rect
+        (_, _), (rect_w, rect_h), _ = rect
         rect_area = rect_w * rect_h
         fill_ratio = area / rect_area if rect_area > 0 else 0
 
@@ -253,17 +274,14 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
             while len(approx) > 10 and escalate < 0.08:
                 escalate += 0.01
                 approx = cv2.approxPolyDP(cnt, escalate * cv2.arcLength(cnt, True), True)
-
             if len(approx) < 4:
                 continue
-
             approx_pts = approx.reshape(-1, 2)
             perim = cv2.arcLength(cnt, True)
             min_edge_len = max(8.0, perim * 0.02)
             approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
             if len(approx_pts) < 4:
                 continue
-
             snapped = _snap_orthogonal_alternating(approx_pts)
             approx = snapped.reshape(-1, 1, 2)
 
@@ -274,26 +292,18 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
                 max(xs_px) >= w - edge_margin or max(ys_px) >= h - edge_margin):
             continue
 
-        pts_m = []
-        for point in approx:
-            px, py = point[0]
-            mx = (px - w / 2.0) / px_to_meter
-            my = (py - h / 2.0) / px_to_meter
-            pts_m.append([mx, my])
-
+        pts_m = [[(px - w / 2.0) / px_to_meter, (py - h / 2.0) / px_to_meter]
+                  for px, py in [pt[0] for pt in approx]]
         xs = [p[0] for p in pts_m]
         ys = [p[1] for p in pts_m]
         bb_w = max(xs) - min(xs)
         bb_h = max(ys) - min(ys)
         if bb_w < 0.8 or bb_h < 0.8 or bb_w > 18 or bb_h > 18:
             continue
-        min_side = min(bb_w, bb_h)
-        max_side = max(bb_w, bb_h)
+        min_side, max_side = min(bb_w, bb_h), max(bb_w, bb_h)
         if max_side > 0 and min_side / max_side < 0.15:
             continue
-
-        img_w_m = w / px_to_meter
-        img_h_m = h / px_to_meter
+        img_w_m, img_h_m = w / px_to_meter, h / px_to_meter
         if bb_w > img_w_m * 0.85 and bb_h > img_h_m * 0.85:
             continue
 
@@ -307,8 +317,51 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
             "walls": polygon_to_walls(pts_m),
             "area": round(bb_w * bb_h, 2),
         })
-
     return rooms
+
+
+def _score_result(rooms: List[Dict[str, Any]], w: int, h: int, px_to_meter: float) -> float:
+    if not rooms:
+        return -1.0
+    total_area = sum(r["area"] for r in rooms)
+    image_area = (w / px_to_meter) * (h / px_to_meter)
+    coverage = total_area / image_area if image_area > 0 else 0
+    if coverage < 0.15 or coverage > 1.05:
+        return -1.0
+    coverage_score = 1.0 - abs(coverage - 0.65)
+    room_count_score = min(len(rooms), 10) / 10.0
+    return coverage_score * 0.7 + room_count_score * 0.3
+
+
+def _segment_rooms(gray: np.ndarray, w: int, h: int,
+                   px_to_meter: float) -> List[Dict[str, Any]]:
+    total_px = w * h
+    min_room_area_px = total_px * 0.008
+
+    PARAM_SETS = [
+        {"canny_low": 30, "canny_high": 100, "hough_thresh": 25, "min_wall_frac": 0.003, "dist_thresh": 0.35},
+        {"canny_low": 50, "canny_high": 150, "hough_thresh": 40, "min_wall_frac": 0.003, "dist_thresh": 0.35},
+        {"canny_low": 20, "canny_high": 80, "hough_thresh": 20, "min_wall_frac": 0.002, "dist_thresh": 0.30},
+        {"canny_low": 50, "canny_high": 150, "hough_thresh": 40, "min_wall_frac": 0.004, "dist_thresh": 0.45},
+    ]
+
+    best_rooms: List[Dict[str, Any]] = []
+    best_score = -1.0
+
+    for params in PARAM_SETS:
+        try:
+            walls = _build_wall_mask(gray, w, h, params["canny_low"], params["canny_high"],
+                                      params["hough_thresh"], params["min_wall_frac"])
+            rooms = _rooms_from_wall_mask(walls, w, h, px_to_meter, min_room_area_px,
+                                          params["dist_thresh"])
+            score = _score_result(rooms, w, h, px_to_meter)
+            if score > best_score:
+                best_score = score
+                best_rooms = rooms
+        except Exception:
+            continue
+
+    return best_rooms
 
 
 def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
