@@ -126,9 +126,7 @@ def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
     min_line_len = max(15, int(math.sqrt(total_px) * 0.02))
     lines = cv2.HoughLinesP(
         edges, rho=1, theta=np.pi / 180,
-        threshold=25,
-        minLineLength=min_line_len,
-        maxLineGap=20,
+        threshold=25, minLineLength=min_line_len, maxLineGap=20,
     )
 
     wall_mask = np.zeros((h, w), dtype=np.uint8)
@@ -260,7 +258,6 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
                 continue
 
             approx_pts = approx.reshape(-1, 2)
-
             perim = cv2.arcLength(cnt, True)
             min_edge_len = max(8.0, perim * 0.02)
             approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
@@ -336,6 +333,15 @@ def build_response(rooms: List[Dict[str, Any]], floors: int) -> dict:
         "totalFloors": floors,
         "calculatedSqFt": round(sum(r["area"] for r in rooms) * 10.764, 1),
     }
+
+
+def _result_is_plausible(rooms: list, orig_w: int, orig_h: int, px_to_meter: float) -> bool:
+    if not rooms or len(rooms) < 2:
+        return False
+    total_area_m2 = sum(r["area"] for r in rooms)
+    image_area_m2 = (orig_w / px_to_meter) * (orig_h / px_to_meter)
+    coverage = total_area_m2 / image_area_m2 if image_area_m2 > 0 else 0
+    return 0.20 <= coverage <= 1.0
 
 
 class JSONRoom(BaseModel):
@@ -474,14 +480,32 @@ async def process_layout_image(file: UploadFile = File(...), floors: int = Query
         raise HTTPException(status_code=400, detail="Invalid format.")
     try:
         image_bytes = await file.read()
-        rooms = segment_rooms_ml(image_bytes)
-        method = "ml"
-        if not rooms:
-            rooms = extract_walls_via_contours(image_bytes)
-            method = "opencv"
-        resp = build_response(rooms, floors)
-        resp["segmentationMethod"] = method
-        return resp
+
+        # ---- Primary: classical CV pipeline (tuned against real scans) ----
+        rooms = extract_walls_via_contours(image_bytes)
+        method = "opencv"
+
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img_check = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        classical_ok = False
+        if img_check is not None:
+            h_c, w_c = img_check.shape[:2]
+            px_to_meter_c = h_c / 14.0
+            classical_ok = _result_is_plausible(rooms, w_c, h_c, px_to_meter_c)
+
+        # ---- Backup: ML model, only if classical came up empty/implausible ----
+        if not classical_ok:
+            ml_rooms = segment_rooms_ml(image_bytes)
+            if ml_rooms and img_check is not None:
+                if _result_is_plausible(ml_rooms, w_c, h_c, px_to_meter_c):
+                    rooms = ml_rooms
+                    method = "ml"
+            # If ML also fails/implausible, we keep whatever classical
+            # produced (even if imperfect) rather than returning nothing.
+
+        response = build_response(rooms, floors)
+        response["segmentationMethod"] = method
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
