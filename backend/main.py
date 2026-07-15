@@ -78,6 +78,46 @@ def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
     return snapped.astype(np.int32)
 
 
+def _collapse_short_edges(pts: np.ndarray, min_len: float) -> np.ndarray:
+    pts = pts.astype(np.float64).tolist()
+    changed = True
+    while changed and len(pts) > 4:
+        changed = False
+        for i in range(len(pts)):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % len(pts)]
+            dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+            if dist < min_len:
+                del pts[(i + 1) % len(pts)]
+                changed = True
+                break
+    return np.array(pts, dtype=np.float64)
+
+
+def _snap_orthogonal_alternating(pts: np.ndarray) -> np.ndarray:
+    n = len(pts)
+    snapped = pts.copy().astype(np.float64)
+    last_orientation = None
+    for i in range(n):
+        p1 = snapped[i]
+        p2 = snapped[(i + 1) % n]
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        if max(abs(dx), abs(dy)) < 0.5:
+            continue
+        prefer_horizontal = abs(dx) >= abs(dy)
+        if last_orientation == "H":
+            prefer_horizontal = False
+        elif last_orientation == "V":
+            prefer_horizontal = True
+        if prefer_horizontal:
+            snapped[(i + 1) % n][1] = p1[1]
+            last_orientation = "H"
+        else:
+            snapped[(i + 1) % n][0] = p1[0]
+            last_orientation = "V"
+    return snapped.astype(np.int32)
+
+
 def _detect_wall_lines(gray: np.ndarray, w: int, h: int) -> np.ndarray:
     edges = cv2.Canny(gray, 30, 100, apertureSize=3)
 
@@ -209,12 +249,24 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
             box = cv2.boxPoints(rect)
             approx = box.reshape(-1, 1, 2).astype(np.int32)
         else:
-            epsilon = 0.03 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
+            escalate = 0.02
+            while len(approx) > 10 and escalate < 0.08:
+                escalate += 0.01
+                approx = cv2.approxPolyDP(cnt, escalate * cv2.arcLength(cnt, True), True)
+
             if len(approx) < 4:
                 continue
+
             approx_pts = approx.reshape(-1, 2)
-            snapped = _snap_orthogonal(approx_pts)
+
+            perim = cv2.arcLength(cnt, True)
+            min_edge_len = max(8.0, perim * 0.02)
+            approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
+            if len(approx_pts) < 4:
+                continue
+
+            snapped = _snap_orthogonal_alternating(approx_pts)
             approx = snapped.reshape(-1, 1, 2)
 
         xs_px = [int(pt[0][0]) for pt in approx]
