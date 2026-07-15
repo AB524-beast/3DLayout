@@ -21,10 +21,11 @@ cv2.line(img, (360, 300), (760, 300), (0, 0, 0), 6)
 
 _, buf = cv2.imencode('.png', img)
 files = {'file': ('plan3.png', buf.tobytes(), 'image/png')}
-r = requests.post('http://127.0.0.1:8000/api/v1/process-layout/image?floors=1&method=auto', files=files)
+r = requests.post('http://127.0.0.1:8000/api/v1/process-layout/image?floors=1', files=files)
 print(f'Status: {r.status_code}')
 data = r.json()
 print(f'TotalRooms: {data["totalRooms"]}')
+print(f'Engine: {data.get("segmentationMethod", "unknown")}')
 for room in data["rooms"]:
     n_walls = len(room["walls"])
     xs = [w["x1"] for w in room["walls"]] + [w["x2"] for w in room["walls"]]

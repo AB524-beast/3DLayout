@@ -9,10 +9,11 @@ cv2.rectangle(img, (80, 80), (420, 420), (0, 0, 0), 6)
 
 _, buf = cv2.imencode('.png', img)
 files = {'file': ('test.png', buf.tobytes(), 'image/png')}
-r = requests.post('http://127.0.0.1:8000/api/v1/process-layout/image?floors=1&method=auto', files=files)
+r = requests.post('http://127.0.0.1:8000/api/v1/process-layout/image?floors=1', files=files)
 print(f'Status: {r.status_code}')
 data = r.json()
 print(f'TotalRooms: {data["totalRooms"]}')
+print(f'Engine: {data.get("segmentationMethod", "unknown")}')
 if data["rooms"]:
     for room in data["rooms"]:
         print(f'  {room["label"]}: {room["dimensions"]}, area={room["area"]}')

@@ -159,6 +159,17 @@ export default function HomePage() {
                     <span className="text-gray-500 mr-1">Total Footprint:</span>
                     <span className="font-bold text-purple-400">{layoutData.calculatedSqFt || 1500} sq.ft.</span>
                   </div>
+                  {layoutData.segmentationMethod && (
+                    <>
+                      <div className="w-px h-3 bg-gray-800" />
+                      <div>
+                        <span className="text-gray-500 mr-1">Engine:</span>
+                        <span className={`font-bold ${layoutData.segmentationMethod === 'ml' ? 'text-green-400' : 'text-amber-400'}`}>
+                          {layoutData.segmentationMethod === 'ml' ? 'ML' : 'OpenCV'}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {layoutData.totalFloors > 1 && (

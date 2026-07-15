@@ -12,6 +12,7 @@ import logging
 
 from tracing import setup_tracing
 from database import save_project, save_rooms
+from model_inference import segment_rooms_ml, is_model_available
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s\t%(name)s\t%(message)s")
 
@@ -473,8 +474,14 @@ async def process_layout_image(file: UploadFile = File(...), floors: int = Query
         raise HTTPException(status_code=400, detail="Invalid format.")
     try:
         image_bytes = await file.read()
-        rooms = extract_walls_via_contours(image_bytes)
-        return build_response(rooms, floors)
+        rooms = segment_rooms_ml(image_bytes)
+        method = "ml"
+        if not rooms:
+            rooms = extract_walls_via_contours(image_bytes)
+            method = "opencv"
+        resp = build_response(rooms, floors)
+        resp["segmentationMethod"] = method
+        return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
