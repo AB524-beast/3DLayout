@@ -11,4 +11,4 @@ services:
       - key: PORT
         value: 8000
       - key: CORS_ORIGINS
-        value: "https://3-d-layout-37k8-dc3pluorm-ab524-beasts-projects.vercel.app,https://3-d-layout-37k8-dc3pluorm-ab524-beasts-projects.vercel.app"
+        value: "*"
