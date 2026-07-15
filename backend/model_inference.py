@@ -46,6 +46,86 @@ def is_model_available() -> bool:
     return _MODEL is not None
 
 
+def _snap_orthogonal_strict(pts: np.ndarray, tol_deg: float = 10.0) -> np.ndarray:
+    n = len(pts)
+    if n < 4:
+        return pts.copy().astype(np.int32)
+    snapped = pts.copy().astype(np.float64)
+
+    for _ in range(3):
+        changed = False
+        for i in range(n):
+            p1 = snapped[i]
+            p2 = snapped[(i + 1) % n]
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            length = math.hypot(dx, dy)
+            if length < 1.0:
+                continue
+            angle = abs(math.degrees(math.atan2(abs(dy), abs(dx))))
+            if angle < tol_deg:
+                new_y = p1[1]
+                if abs(p2[1] - new_y) > 0.5:
+                    snapped[(i + 1) % n][1] = new_y
+                    changed = True
+            elif angle > 90.0 - tol_deg:
+                new_x = p1[0]
+                if abs(p2[0] - new_x) > 0.5:
+                    snapped[(i + 1) % n][0] = new_x
+                    changed = True
+        if not changed:
+            break
+
+    for i in range(n):
+        p1 = snapped[i]
+        p2 = snapped[(i + 1) % n]
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        angle = abs(math.degrees(math.atan2(abs(dy), abs(dx))))
+        if angle < tol_deg:
+            snapped[(i + 1) % n][1] = p1[1]
+        elif angle > 90.0 - tol_deg:
+            snapped[(i + 1) % n][0] = p1[0]
+
+    return snapped.astype(np.int32)
+
+
+def _collapse_short_edges(pts: np.ndarray, min_len: float) -> np.ndarray:
+    pts = pts.astype(np.float64).tolist()
+    changed = True
+    while changed and len(pts) > 4:
+        changed = False
+        for i in range(len(pts)):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % len(pts)]
+            dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+            if dist < min_len:
+                del pts[(i + 1) % len(pts)]
+                changed = True
+                break
+    return np.array(pts, dtype=np.float64)
+
+
+def _polygon_area(pts):
+    n = len(pts)
+    area = 0.0
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2.0
+
+
+def _refine_mask_morphologically(mask: np.ndarray) -> np.ndarray:
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    refined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k, iterations=2)
+
+    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    refined = cv2.morphologyEx(refined, cv2.MORPH_OPEN, open_k, iterations=1)
+
+    return refined
+
+
 def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
     _load_model()
     if _MODEL is None:
@@ -82,12 +162,14 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
             if cv2.countNonZero(cls_mask) == 0:
                 continue
 
+            cls_mask = _refine_mask_morphologically(cls_mask)
+
             cnts, _ = cv2.findContours(
                 cls_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             for cnt in cnts:
                 area_px = cv2.contourArea(cnt)
-                if area_px < (w_orig * h_orig) * 0.005:
+                if area_px < (w_orig * h_orig) * 0.004:
                     continue
 
                 rect = cv2.minAreaRect(cnt)
@@ -101,14 +183,26 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
                 else:
                     epsilon = 0.02 * cv2.arcLength(cnt, True)
                     approx = cv2.approxPolyDP(cnt, epsilon, True)
+                    escalate = 0.02
+                    while len(approx) > 8 and escalate < 0.08:
+                        escalate += 0.01
+                        approx = cv2.approxPolyDP(cnt, escalate * cv2.arcLength(cnt, True), True)
                     if len(approx) < 4:
                         continue
                     approx_pts = approx.reshape(-1, 2)
 
+                    perim = cv2.arcLength(cnt, True)
+                    min_edge_len = max(8.0, perim * 0.02)
+                    approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
+                    if len(approx_pts) < 4:
+                        continue
+                    snapped = _snap_orthogonal_strict(approx_pts)
+                    approx_pts = snapped
+
                 xs_px = [int(p[0]) for p in approx_pts]
                 ys_px = [int(p[1]) for p in approx_pts]
 
-                edge_margin = 3
+                edge_margin = max(3, int(min(w_orig, h_orig) * 0.005))
                 if (min(xs_px) <= edge_margin or min(ys_px) <= edge_margin or
                         max(xs_px) >= w_orig - edge_margin or
                         max(ys_px) >= h_orig - edge_margin):
@@ -125,22 +219,24 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
                 ys = [p[1] for p in pts_m]
                 bb_w = max(xs) - min(xs)
                 bb_h = max(ys) - min(ys)
-                if bb_w < 0.8 or bb_h < 0.8 or bb_w > 18 or bb_h > 18:
+                if bb_w < 0.5 or bb_h < 0.5:
+                    continue
+                if bb_w > 25 or bb_h > 25:
                     continue
                 min_side = min(bb_w, bb_h)
                 max_side = max(bb_w, bb_h)
-                if max_side > 0 and min_side / max_side < 0.15:
+                if max_side > 0 and min_side / max_side < 0.10:
                     continue
 
                 img_w_m = w_orig / px_to_meter
                 img_h_m = h_orig / px_to_meter
-                if bb_w > img_w_m * 0.85 and bb_h > img_h_m * 0.85:
+                if bb_w > img_w_m * 0.90 and bb_h > img_h_m * 0.90:
                     continue
 
                 class_name = ROOM_CLASSES[cls] if cls < len(ROOM_CLASSES) else "Other"
 
-                walls = []
                 n = len(pts_m)
+                walls = []
                 for i in range(n):
                     x1, y1 = pts_m[i]
                     x2, y2 = pts_m[(i + 1) % n]
@@ -154,8 +250,13 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
                     "elevationZ": 0.0,
                     "isOpenSpace": class_name in OPEN_SPACE_CLASSES,
                     "walls": walls,
-                    "area": round(bb_w * bb_h, 2),
+                    "area": round(_polygon_area(pts_m), 2),
+                    "_px_area": float(area_px),
                 })
+
+        rooms.sort(key=lambda r: r.get("_px_area", 0), reverse=True)
+        for r in rooms:
+            r.pop("_px_area", None)
 
         return rooms if rooms else None
 
