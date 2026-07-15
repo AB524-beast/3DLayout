@@ -320,6 +320,37 @@ def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
     return rooms
 
 
+def _build_wall_mask_double_line(gray: np.ndarray, w: int, h: int) -> np.ndarray:
+    edges = cv2.Canny(gray, 20, 80, apertureSize=3)
+    total_px = w * h
+    lines = cv2.HoughLinesP(
+        edges, rho=1, theta=np.pi / 180,
+        threshold=15, minLineLength=max(10, int(math.sqrt(total_px) * 0.015)),
+        maxLineGap=8,
+    )
+
+    wall_mask = np.zeros((h, w), dtype=np.uint8)
+    if lines is not None:
+        for line in lines:
+            coords = np.asarray(line).reshape(-1)
+            if coords.size < 4:
+                continue
+            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+            dx, dy = x2 - x1, y2 - y1
+            angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+            if not (angle < 10 or angle > 80):
+                continue
+            if angle < 10:
+                y2 = y1
+            else:
+                x2 = x1
+            cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=2)
+
+    bridge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, bridge_k, iterations=2)
+    return wall_mask
+
+
 def _score_result(rooms: List[Dict[str, Any]], w: int, h: int, px_to_meter: float) -> float:
     if not rooms:
         return -1.0
@@ -360,6 +391,16 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
                 best_rooms = rooms
         except Exception:
             continue
+
+    try:
+        cad_walls = _build_wall_mask_double_line(gray, w, h)
+        cad_rooms = _rooms_from_wall_mask(cad_walls, w, h, px_to_meter, min_room_area_px, 0.35)
+        cad_score = _score_result(cad_rooms, w, h, px_to_meter)
+        if cad_score > best_score:
+            best_score = cad_score
+            best_rooms = cad_rooms
+    except Exception:
+        pass
 
     return best_rooms
 
