@@ -354,14 +354,43 @@ def _build_wall_mask_double_line(gray: np.ndarray, w: int, h: int) -> np.ndarray
 def _score_result(rooms: List[Dict[str, Any]], w: int, h: int, px_to_meter: float) -> float:
     if not rooms:
         return -1.0
+
     total_area = sum(r["area"] for r in rooms)
     image_area = (w / px_to_meter) * (h / px_to_meter)
     coverage = total_area / image_area if image_area > 0 else 0
     if coverage < 0.15 or coverage > 1.05:
         return -1.0
+
+    overlap_penalty = 0.0
+    for i in range(len(rooms)):
+        for j in range(i + 1, len(rooms)):
+            xi1 = rooms[i]["centerX"] - math.sqrt(rooms[i]["area"]) / 2
+            xi2 = rooms[i]["centerX"] + math.sqrt(rooms[i]["area"]) / 2
+            yi1 = rooms[i]["centerY"] - math.sqrt(rooms[i]["area"]) / 2
+            yi2 = rooms[i]["centerY"] + math.sqrt(rooms[i]["area"]) / 2
+            xj1 = rooms[j]["centerX"] - math.sqrt(rooms[j]["area"]) / 2
+            xj2 = rooms[j]["centerX"] + math.sqrt(rooms[j]["area"]) / 2
+            yj1 = rooms[j]["centerY"] - math.sqrt(rooms[j]["area"]) / 2
+            yj2 = rooms[j]["centerY"] + math.sqrt(rooms[j]["area"]) / 2
+            ox = max(0, min(xi2, xj2) - max(xi1, xj1))
+            oy = max(0, min(yi2, yj2) - max(yi1, yj1))
+            if ox > 0 and oy > 0:
+                overlap_penalty += (ox * oy) / min(rooms[i]["area"], rooms[j]["area"])
+
+    sliver_penalty = 0.0
+    areas = [r["area"] for r in rooms]
+    median_area = sorted(areas)[len(areas) // 2]
+    for r in rooms:
+        if median_area > 0 and r["area"] < median_area * 0.15:
+            sliver_penalty += 0.3
+
     coverage_score = 1.0 - abs(coverage - 0.65)
-    room_count_score = min(len(rooms), 10) / 10.0
-    return coverage_score * 0.7 + room_count_score * 0.3
+    room_count_score = min(len(rooms), 8) / 8.0
+
+    score = coverage_score * 0.55 + room_count_score * 0.20
+    score -= overlap_penalty * 0.5
+    score -= sliver_penalty
+    return score
 
 
 def _segment_rooms(gray: np.ndarray, w: int, h: int,
@@ -392,15 +421,16 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
         except Exception:
             continue
 
-    try:
-        cad_walls = _build_wall_mask_double_line(gray, w, h)
-        cad_rooms = _rooms_from_wall_mask(cad_walls, w, h, px_to_meter, min_room_area_px, 0.35)
-        cad_score = _score_result(cad_rooms, w, h, px_to_meter)
-        if cad_score > best_score:
-            best_score = cad_score
-            best_rooms = cad_rooms
-    except Exception:
-        pass
+    if best_score < 0.4:
+        try:
+            cad_walls = _build_wall_mask_double_line(gray, w, h)
+            cad_rooms = _rooms_from_wall_mask(cad_walls, w, h, px_to_meter, min_room_area_px, 0.35)
+            cad_score = _score_result(cad_rooms, w, h, px_to_meter)
+            if cad_score > best_score:
+                best_score = cad_score
+                best_rooms = cad_rooms
+        except Exception:
+            pass
 
     return best_rooms
 
