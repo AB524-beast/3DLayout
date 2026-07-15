@@ -167,6 +167,11 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
     # ---- Strip border/margin region ------------------------------
     rooms_bin = _remove_border_region(rooms_bin)
 
+    # ---- Smooth boundary jitter from combining two wall masks -----
+    smooth_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_CLOSE, smooth_k, iterations=1)
+    rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, smooth_k, iterations=1)
+
     # ---- Distance transform + watershed seeding ------------------
     dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
@@ -195,13 +200,22 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
         if area < min_room_area_px:
             continue
 
-        epsilon = 0.02 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        if len(approx) < 4:
-            continue
-        approx_pts = approx.reshape(-1, 2)
-        snapped = _snap_orthogonal(approx_pts)
-        approx = snapped.reshape(-1, 1, 2)
+        rect = cv2.minAreaRect(cnt)
+        (rect_cx, rect_cy), (rect_w, rect_h), rect_angle = rect
+        rect_area = rect_w * rect_h
+        fill_ratio = area / rect_area if rect_area > 0 else 0
+
+        if fill_ratio > 0.72:
+            box = cv2.boxPoints(rect)
+            approx = box.reshape(-1, 1, 2).astype(np.int32)
+        else:
+            epsilon = 0.03 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if len(approx) < 4:
+                continue
+            approx_pts = approx.reshape(-1, 2)
+            snapped = _snap_orthogonal(approx_pts)
+            approx = snapped.reshape(-1, 1, 2)
 
         xs_px = [int(pt[0][0]) for pt in approx]
         ys_px = [int(pt[0][1]) for pt in approx]
