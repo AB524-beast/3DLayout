@@ -93,9 +93,9 @@ export default function RoomCorrectionEditor({
 }) {
   const [imgDims, setImgDims] = useState(null);
   const [selectedRoomId, setSelectedRoomId] = useState(null);
-  const [dragInfo, setDragInfo] = useState(null);
   const [editingLabel, setEditingLabel] = useState(null);
   const svgRef = useRef(null);
+  const dragRef = useRef(null);
 
   const pxToMeter = imgDims ? imgDims.h / PLANE_METERS : 1;
 
@@ -106,7 +106,12 @@ export default function RoomCorrectionEditor({
       label: r.label || "Room",
       isOpenSpace: !!r.isOpenSpace,
       elevationZ: r.elevationZ || 0,
-      vertices: wallsToPixelVertices(r.walls || [], imgDims.h / PLANE_METERS, imgDims.w, imgDims.h),
+      vertices: wallsToPixelVertices(
+        r.walls || [],
+        imgDims.h / PLANE_METERS,
+        imgDims.w,
+        imgDims.h
+      ),
     }));
   }, [imgDims, layoutData]);
 
@@ -130,35 +135,38 @@ export default function RoomCorrectionEditor({
     pt.y = clientY;
     const ctm = svg.getScreenCTM();
     if (!ctm) return { x: 0, y: 0 };
-    const transformed = pt.matrixTransform(ctm.inverse());
-    return { x: transformed.x, y: transformed.y };
+    return pt.matrixTransform(ctm.inverse());
   }, []);
 
-  const handlePointerDown = (roomId, vertexIdx) => (e) => {
+  const handlePointerDown = useCallback((roomId, vertexIdx) => (e) => {
     e.stopPropagation();
     e.preventDefault();
+    e.target.setPointerCapture(e.pointerId);
     setSelectedRoomId(roomId);
-    setDragInfo({ roomId, vertexIdx });
-  };
+    dragRef.current = { roomId, vertexIdx };
+  }, []);
 
   const handlePointerMove = useCallback(
     (e) => {
-      if (!dragInfo) return;
+      const drag = dragRef.current;
+      if (!drag) return;
       const { x, y } = svgPoint(e.clientX, e.clientY);
       setRooms((prev) =>
         prev.map((r) => {
-          if (r.id !== dragInfo.roomId) return r;
+          if (r.id !== drag.roomId) return r;
           const newVertices = r.vertices.map((v, idx) =>
-            idx === dragInfo.vertexIdx ? { x, y } : v
+            idx === drag.vertexIdx ? { x, y } : v
           );
           return { ...r, vertices: newVertices };
         })
       );
     },
-    [dragInfo, svgPoint]
+    [svgPoint]
   );
 
-  const handlePointerUp = useCallback(() => setDragInfo(null), []);
+  const handlePointerUp = useCallback(() => {
+    dragRef.current = null;
+  }, []);
 
   useEffect(() => {
     window.addEventListener("pointermove", handlePointerMove);
@@ -169,29 +177,38 @@ export default function RoomCorrectionEditor({
     };
   }, [handlePointerMove, handlePointerUp]);
 
-  const handleEdgeDoubleClick = (roomId, edgeIdx) => (e) => {
-    e.stopPropagation();
-    const { x, y } = svgPoint(e.clientX, e.clientY);
-    setRooms((prev) =>
-      prev.map((r) => {
-        if (r.id !== roomId) return r;
-        const newVertices = [...r.vertices];
-        newVertices.splice(edgeIdx + 1, 0, { x, y });
-        return { ...r, vertices: newVertices };
-      })
-    );
-  };
+  const handleEdgeDoubleClick = useCallback(
+    (roomId, edgeIdx) => (e) => {
+      e.stopPropagation();
+      const { x, y } = svgPoint(e.clientX, e.clientY);
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.id !== roomId) return r;
+          const newVertices = [...r.vertices];
+          newVertices.splice(edgeIdx + 1, 0, { x, y });
+          return { ...r, vertices: newVertices };
+        })
+      );
+    },
+    [svgPoint]
+  );
 
-  const handleVertexDelete = (roomId, vertexIdx) => (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    setRooms((prev) =>
-      prev.map((r) => {
-        if (r.id !== roomId || r.vertices.length <= 3) return r;
-        return { ...r, vertices: r.vertices.filter((_, i) => i !== vertexIdx) };
-      })
-    );
-  };
+  const handleVertexDelete = useCallback(
+    (roomId, vertexIdx) => (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.id !== roomId || r.vertices.length <= 3) return r;
+          return {
+            ...r,
+            vertices: r.vertices.filter((_, i) => i !== vertexIdx),
+          };
+        })
+      );
+    },
+    []
+  );
 
   const handleAddRoom = () => {
     if (!imgDims) return;
@@ -246,9 +263,10 @@ export default function RoomCorrectionEditor({
         r.elevationZ
       )
     );
-    const calculatedSqFt = Math.round(
-      updatedRooms.reduce((sum, r) => sum + r.area * 10.764, 0) * 10
-    ) / 10;
+    const calculatedSqFt =
+      Math.round(
+        updatedRooms.reduce((sum, r) => sum + r.area * 10.764, 0) * 10
+      ) / 10;
 
     onConfirm({
       rooms: updatedRooms,
@@ -267,9 +285,12 @@ export default function RoomCorrectionEditor({
     <div className="flex flex-col w-full h-full bg-gray-950 rounded-2xl border border-gray-800/60 overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800/60 bg-gray-900/60">
         <div>
-          <h2 className="text-sm font-bold text-gray-200">Room Correction Editor</h2>
+          <h2 className="text-sm font-bold text-gray-200">
+            Room Correction Editor
+          </h2>
           <p className="text-[10px] text-gray-500">
-            Drag vertices to adjust walls. Double-click edges to add points.
+            Drag vertices to adjust walls. Double-click edges to add points,
+            vertices to remove.
           </p>
         </div>
         <div className="flex gap-2">
@@ -309,88 +330,83 @@ export default function RoomCorrectionEditor({
               ref={svgRef}
               viewBox={viewBox}
               className="absolute inset-0 w-full h-full"
-              style={{ cursor: dragInfo ? "grabbing" : "default" }}
+              style={{ touchAction: "none" }}
             >
+              <defs>
+                <filter id="glow">
+                  <feGaussianBlur stdDeviation="3" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+              </defs>
+
               {rooms.map((room, roomIdx) => {
                 const color = roomColor(roomIdx);
                 const pts = room.vertices;
                 if (pts.length < 3) return null;
                 const pathD =
-                  pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+                  pts
+                    .map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`)
+                    .join(" ") + " Z";
 
-                const edgeElements = [];
-                for (let i = 0; i < pts.length; i++) {
-                  const a = pts[i];
-                  const b = pts[(i + 1) % pts.length];
-                  const midX = (a.x + b.x) / 2;
-                  const midY = (a.y + b.y) / 2;
-                  edgeElements.push(
-                    <line
-                      key={`edge-${room.id}-${i}`}
-                      x1={a.x}
-                      y1={a.y}
-                      x2={b.x}
-                      y2={b.y}
-                      stroke={color}
-                      strokeWidth={3}
-                      strokeOpacity={0.5}
-                      style={{ cursor: "crosshair" }}
-                      onDoubleClick={handleEdgeDoubleClick(room.id, i)}
-                    />
-                  );
-                  edgeElements.push(
-                    <circle
-                      key={`mid-${room.id}-${i}`}
-                      cx={midX}
-                      cy={midY}
-                      r={4}
-                      fill={color}
-                      fillOpacity={0.2}
-                      stroke="none"
-                      style={{ pointerEvents: "none" }}
-                    />
-                  );
-                }
+                const isSelected = selectedRoomId === room.id;
 
                 return (
                   <g key={room.id}>
                     <path
                       d={pathD}
                       fill={color}
-                      fillOpacity={selectedRoomId === room.id ? 0.15 : 0.08}
-                      stroke={color}
-                      strokeWidth={selectedRoomId === room.id ? 3 : 2}
-                      strokeOpacity={0.8}
-                      onClick={() => setSelectedRoomId(room.id)}
-                      style={{ cursor: "pointer" }}
+                      fillOpacity={isSelected ? 0.18 : 0.08}
+                      stroke="none"
+                      style={{ pointerEvents: "none" }}
                     />
-                    {edgeElements}
+
+                    {pts.map((v, i) => {
+                      const a = pts[i];
+                      const b = pts[(i + 1) % pts.length];
+                      return (
+                        <line
+                          key={`edge-${room.id}-${i}`}
+                          x1={a.x}
+                          y1={a.y}
+                          x2={b.x}
+                          y2={b.y}
+                          stroke={color}
+                          strokeWidth={isSelected ? 4 : 3}
+                          strokeOpacity={isSelected ? 0.9 : 0.5}
+                          style={{ cursor: "crosshair", pointerEvents: "stroke" }}
+                          onDoubleClick={handleEdgeDoubleClick(room.id, i)}
+                        />
+                      );
+                    })}
+
                     {pts.map((v, vIdx) => (
-                      <g key={`vertex-${room.id}-${vIdx}`}>
-                        <circle
-                          cx={v.x}
-                          cy={v.y}
-                          r={7}
-                          fill={color}
-                          fillOpacity={0.9}
-                          stroke="white"
-                          strokeWidth={2}
-                          style={{ cursor: "grab" }}
-                          onPointerDown={handlePointerDown(room.id, vIdx)}
-                        />
-                        <circle
-                          cx={v.x}
-                          cy={v.y}
-                          r={10}
-                          fill="transparent"
-                          style={{ cursor: "pointer" }}
-                          onDoubleClick={handleVertexDelete(room.id, vIdx)}
-                        />
-                      </g>
+                      <circle
+                        key={`vertex-${room.id}-${vIdx}`}
+                        cx={v.x}
+                        cy={v.y}
+                        r={isSelected ? 9 : 7}
+                        fill={color}
+                        fillOpacity={0.95}
+                        stroke="white"
+                        strokeWidth={isSelected ? 3 : 2}
+                        style={{
+                          cursor: "grab",
+                          touchAction: "none",
+                          filter: isSelected ? "url(#glow)" : "none",
+                        }}
+                        onPointerDown={handlePointerDown(room.id, vIdx)}
+                        onDoubleClick={handleVertexDelete(room.id, vIdx)}
+                      />
                     ))}
+
                     {(() => {
-                      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-                      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+                      const cx =
+                        pts.reduce((s, p) => s + p.x, 0) / pts.length;
+                      const cy =
+                        pts.reduce((s, p) => s + p.y, 0) / pts.length;
                       return (
                         <text
                           x={cx}
@@ -398,7 +414,7 @@ export default function RoomCorrectionEditor({
                           textAnchor="middle"
                           dominantBaseline="middle"
                           fill="white"
-                          fontSize={12}
+                          fontSize={isSelected ? 14 : 12}
                           fontWeight="bold"
                           style={{ pointerEvents: "none" }}
                         >
@@ -443,7 +459,9 @@ export default function RoomCorrectionEditor({
                     <input
                       autoFocus
                       value={room.label}
-                      onChange={(e) => handleLabelChange(room.id, e.target.value)}
+                      onChange={(e) =>
+                        handleLabelChange(room.id, e.target.value)
+                      }
                       onBlur={() => setEditingLabel(null)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") setEditingLabel(null);
