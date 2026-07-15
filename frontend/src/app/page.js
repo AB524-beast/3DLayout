@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import BlueprintUploader from '@/components/BlueprintUploader';
 import RoomExtrusionCanvas from '@/components/RoomExtrusionCanvas';
+import RoomCorrectionEditor from '@/components/RoomCorrectionEditor';
 import { GridScan } from '@/components/GridScan/GridScan';
 import { useAuth } from '@/context/AuthContext';
 
@@ -16,6 +17,7 @@ export default function HomePage() {
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(null);
   const [threeRenderer, setThreeRenderer] = useState(null);
+  const [showEditor, setShowEditor] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -89,6 +91,15 @@ export default function HomePage() {
     setThreeRenderer(renderer);
   }, []);
 
+  const handleCorrectionConfirm = useCallback((correctedData) => {
+    setLayoutData(correctedData);
+    setShowEditor(false);
+  }, []);
+
+  const handleCorrectionCancel = useCallback(() => {
+    setShowEditor(false);
+  }, []);
+
   return (
     <div className="min-h-screen bg-black text-white font-sans relative overflow-hidden">
       <div className="absolute inset-0 pointer-events-none">
@@ -148,6 +159,14 @@ export default function HomePage() {
 
           <div className="lg:col-span-7 flex flex-col h-[580px] border border-gray-800/60 rounded-2xl overflow-hidden relative shadow-2xl">
             {layoutData ? (
+              showEditor ? (
+                <RoomCorrectionEditor
+                  layoutData={layoutData}
+                  imageUrl={uploadedImageUrl}
+                  onConfirm={handleCorrectionConfirm}
+                  onCancel={handleCorrectionCancel}
+                />
+              ) : (
               <>
                 <div className="absolute top-4 left-4 z-20 bg-gray-900/90 border border-gray-800 rounded-xl px-3 py-2 flex items-center gap-4 text-xs">
                   <div>
@@ -214,12 +233,19 @@ export default function HomePage() {
                   </div>
                   <div className="flex flex-col gap-1.5 shrink-0">
                     <button
+                      onClick={() => setShowEditor(true)}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all whitespace-nowrap"
+                      title="Open room correction editor"
+                    >
+                      Correct Layout
+                    </button>
+                    <button
                       onClick={handleDownloadScreenshot}
                       disabled={!threeRenderer}
                       className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-40 whitespace-nowrap"
                       title="Download 3D viewport as PNG"
                     >
-                      📷 Screenshot
+                      Screenshot
                     </button>
                     <button
                       onClick={handleDownloadJSON}
@@ -227,17 +253,18 @@ export default function HomePage() {
                       className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-40 whitespace-nowrap"
                       title="Download layout data as JSON"
                     >
-                      📥 JSON
+                      JSON
                     </button>
                     <Link
                       href="/dashboard"
                       className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-bold uppercase rounded-lg transition-all whitespace-nowrap text-center"
                     >
-                      ← Dashboard
+                      Dashboard
                     </Link>
                   </div>
                 </div>
               </>
+              )
             ) : (
               <div className="relative z-10 w-full h-full flex flex-col items-center justify-center border-2 border-dashed border-gray-900/60 rounded-2xl bg-gray-950/40 text-center p-8">
                 <div className="w-12 h-12 rounded-xl bg-gray-900 flex items-center justify-center border border-gray-800 text-lg mb-4">🧱</div>
