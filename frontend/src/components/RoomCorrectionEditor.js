@@ -93,9 +93,12 @@ export default function RoomCorrectionEditor({
 }) {
   const [imgDims, setImgDims] = useState(null);
   const [selectedRoomId, setSelectedRoomId] = useState(null);
+  const [selectedVertex, setSelectedVertex] = useState(null);
+  const [hoveredEdge, setHoveredEdge] = useState(null);
   const [editingLabel, setEditingLabel] = useState(null);
   const svgRef = useRef(null);
   const dragRef = useRef(null);
+  const lastAddRef = useRef(0);
 
   const pxToMeter = imgDims ? imgDims.h / PLANE_METERS : 1;
 
@@ -138,13 +141,17 @@ export default function RoomCorrectionEditor({
     return pt.matrixTransform(ctm.inverse());
   }, []);
 
-  const handlePointerDown = useCallback((roomId, vertexIdx) => (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    e.target.setPointerCapture(e.pointerId);
-    setSelectedRoomId(roomId);
-    dragRef.current = { roomId, vertexIdx };
-  }, []);
+  const handlePointerDown = useCallback(
+    (roomId, vertexIdx) => (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      e.target.setPointerCapture(e.pointerId);
+      setSelectedRoomId(roomId);
+      setSelectedVertex({ roomId, vertexIdx });
+      dragRef.current = { roomId, vertexIdx };
+    },
+    []
+  );
 
   const handlePointerMove = useCallback(
     (e) => {
@@ -206,9 +213,98 @@ export default function RoomCorrectionEditor({
           };
         })
       );
+      setSelectedVertex(null);
     },
     []
   );
+
+  const handleEdgeAddVertex = useCallback(
+    (roomId, edgeIdx) => (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const now = Date.now();
+      if (now - lastAddRef.current < 250) return;
+      lastAddRef.current = now;
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.id !== roomId) return r;
+          const a = r.vertices[edgeIdx];
+          const b = r.vertices[(edgeIdx + 1) % r.vertices.length];
+          const midX = (a.x + b.x) / 2;
+          const midY = (a.y + b.y) / 2;
+          const newVertices = [...r.vertices];
+          newVertices.splice(edgeIdx + 1, 0, { x: midX, y: midY });
+          return { ...r, vertices: newVertices };
+        })
+      );
+    },
+    []
+  );
+
+  const handleEdgeDelete = useCallback(
+    (roomId, edgeIdx) => (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.id !== roomId || r.vertices.length <= 3) return r;
+          const removeIdx = (edgeIdx + 1) % r.vertices.length;
+          return {
+            ...r,
+            vertices: r.vertices.filter((_, i) => i !== removeIdx),
+          };
+        })
+      );
+      setHoveredEdge(null);
+    },
+    []
+  );
+
+  const handleVertexContextMenu = useCallback(
+    (roomId, vertexIdx) => (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.id !== roomId || r.vertices.length <= 3) return r;
+          return {
+            ...r,
+            vertices: r.vertices.filter((_, i) => i !== vertexIdx),
+          };
+        })
+      );
+      setSelectedVertex(null);
+    },
+    []
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedVertex) {
+          const { roomId, vertexIdx } = selectedVertex;
+          setRooms((prev) =>
+            prev.map((r) => {
+              if (r.id !== roomId || r.vertices.length <= 3) return r;
+              return {
+                ...r,
+                vertices: r.vertices.filter((_, i) => i !== vertexIdx),
+              };
+            })
+          );
+          setSelectedVertex(null);
+        }
+      }
+      if (e.key === "Escape") {
+        setSelectedVertex(null);
+        setHoveredEdge(null);
+        setSelectedRoomId(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedVertex]);
 
   const handleAddRoom = () => {
     if (!imgDims) return;
@@ -289,8 +385,7 @@ export default function RoomCorrectionEditor({
             Room Correction Editor
           </h2>
           <p className="text-[10px] text-gray-500">
-            Drag vertices to adjust walls. Double-click edges to add points,
-            vertices to remove.
+            Drag vertices to move walls. Click <span className="text-green-400 font-bold">+</span> on edges to add points for curves. Right-click edges or vertices to delete. Press <span className="text-gray-300">Delete</span> key to remove selected vertex.
           </p>
         </div>
         <div className="flex gap-2">
@@ -366,41 +461,136 @@ export default function RoomCorrectionEditor({
                     {pts.map((v, i) => {
                       const a = pts[i];
                       const b = pts[(i + 1) % pts.length];
+                      const mx = (a.x + b.x) / 2;
+                      const my = (a.y + b.y) / 2;
+                      const isHovered =
+                        hoveredEdge?.roomId === room.id &&
+                        hoveredEdge?.edgeIdx === i;
+
                       return (
-                        <line
-                          key={`edge-${room.id}-${i}`}
-                          x1={a.x}
-                          y1={a.y}
-                          x2={b.x}
-                          y2={b.y}
-                          stroke={color}
-                          strokeWidth={isSelected ? 4 : 3}
-                          strokeOpacity={isSelected ? 0.9 : 0.5}
-                          style={{ cursor: "crosshair", pointerEvents: "stroke" }}
-                          onDoubleClick={handleEdgeDoubleClick(room.id, i)}
-                        />
+                        <g key={`edge-${room.id}-${i}`}>
+                          <line
+                            x1={a.x}
+                            y1={a.y}
+                            x2={b.x}
+                            y2={b.y}
+                            stroke="transparent"
+                            strokeWidth={14}
+                            style={{ cursor: "crosshair" }}
+                            onDoubleClick={handleEdgeDoubleClick(room.id, i)}
+                            onContextMenu={handleEdgeDelete(room.id, i)}
+                            onMouseEnter={() =>
+                              isSelected &&
+                              setHoveredEdge({ roomId: room.id, edgeIdx: i })
+                            }
+                            onMouseLeave={() =>
+                              setHoveredEdge((prev) =>
+                                prev?.roomId === room.id &&
+                                prev?.edgeIdx === i
+                                  ? null
+                                  : prev
+                              )
+                            }
+                          />
+                          <line
+                            x1={a.x}
+                            y1={a.y}
+                            x2={b.x}
+                            y2={b.y}
+                            stroke={color}
+                            strokeWidth={isHovered ? 5 : isSelected ? 4 : 3}
+                            strokeOpacity={isHovered ? 1 : isSelected ? 0.9 : 0.5}
+                            style={{ pointerEvents: "none" }}
+                          />
+                          {isSelected && (
+                            <g
+                              style={{ cursor: "pointer" }}
+                              onClick={handleEdgeAddVertex(room.id, i)}
+                              onContextMenu={handleEdgeDelete(room.id, i)}
+                            >
+                              <circle
+                                cx={mx}
+                                cy={my}
+                                r={isHovered ? 11 : 8}
+                                fill="#0f172a"
+                                stroke={isHovered ? "#22c55e" : color}
+                                strokeWidth={2}
+                                fillOpacity={isHovered ? 1 : 0.8}
+                              />
+                              <text
+                                x={mx}
+                                y={my}
+                                textAnchor="middle"
+                                dominantBaseline="central"
+                                fill={isHovered ? "#22c55e" : "white"}
+                                fontSize={isHovered ? 16 : 13}
+                                fontWeight="bold"
+                                style={{ pointerEvents: "none" }}
+                              >
+                                +
+                              </text>
+                              {isHovered && (
+                                <text
+                                  x={mx}
+                                  y={my + 20}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fill="#94a3b8"
+                                  fontSize={9}
+                                  style={{ pointerEvents: "none" }}
+                                >
+                                  add point
+                                </text>
+                              )}
+                            </g>
+                          )}
+                        </g>
                       );
                     })}
 
-                    {pts.map((v, vIdx) => (
-                      <circle
-                        key={`vertex-${room.id}-${vIdx}`}
-                        cx={v.x}
-                        cy={v.y}
-                        r={isSelected ? 9 : 7}
-                        fill={color}
-                        fillOpacity={0.95}
-                        stroke="white"
-                        strokeWidth={isSelected ? 3 : 2}
-                        style={{
-                          cursor: "grab",
-                          touchAction: "none",
-                          filter: isSelected ? "url(#glow)" : "none",
-                        }}
-                        onPointerDown={handlePointerDown(room.id, vIdx)}
-                        onDoubleClick={handleVertexDelete(room.id, vIdx)}
-                      />
-                    ))}
+                    {pts.map((v, vIdx) => {
+                      const isSel =
+                        selectedVertex?.roomId === room.id &&
+                        selectedVertex?.vertexIdx === vIdx;
+                      return (
+                        <g key={`vertex-${room.id}-${vIdx}`}>
+                          {isSel && (
+                            <circle
+                              cx={v.x}
+                              cy={v.y}
+                              r={14}
+                              fill="none"
+                              stroke={color}
+                              strokeWidth={2}
+                              strokeOpacity={0.4}
+                              strokeDasharray="4 3"
+                              style={{ pointerEvents: "none" }}
+                            />
+                          )}
+                          <circle
+                            cx={v.x}
+                            cy={v.y}
+                            r={isSelected ? 9 : 7}
+                            fill={color}
+                            fillOpacity={0.95}
+                            stroke={isSel ? "#fbbf24" : "white"}
+                            strokeWidth={isSel ? 3 : 2}
+                            style={{
+                              cursor: "grab",
+                              touchAction: "none",
+                              filter:
+                                isSelected ? "url(#glow)" : "none",
+                            }}
+                            onPointerDown={handlePointerDown(room.id, vIdx)}
+                            onDoubleClick={handleVertexDelete(room.id, vIdx)}
+                            onContextMenu={handleVertexContextMenu(
+                              room.id,
+                              vIdx
+                            )}
+                          />
+                        </g>
+                      );
+                    })}
 
                     {(() => {
                       const cx =
