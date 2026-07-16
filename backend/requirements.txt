@@ -13,3 +13,4 @@ opentelemetry-instrumentation-fastapi
 opentelemetry-exporter-otlp-proto-http
 
 onnxruntime==1.24.4
+shapely==2.0.6

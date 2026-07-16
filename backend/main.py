@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import cv2
 import math
+from shapely.geometry import Polygon
 import json
 import os
 import logging
@@ -147,60 +148,33 @@ def _polygons_overlap(poly_a: List[Tuple[float, float]],
     return False
 
 
-def _snap_orthogonal_strict(pts: np.ndarray, tol_deg: float = 10.0) -> np.ndarray:
+def _snap_orthogonal(pts: np.ndarray, tol_deg: float = 8.0) -> np.ndarray:
     n = len(pts)
-    if n < 4:
-        return pts.copy().astype(np.int32)
     snapped = pts.copy().astype(np.float64)
-
-    for _ in range(3):
-        changed = False
-        for i in range(n):
-            p1 = snapped[i]
-            p2 = snapped[(i + 1) % n]
-            dx = p2[0] - p1[0]
-            dy = p2[1] - p1[1]
-            length = math.hypot(dx, dy)
-            if length < 1.0:
-                continue
-            angle = abs(math.degrees(math.atan2(abs(dy), abs(dx))))
-            if angle < tol_deg:
-                new_y = p1[1]
-                if abs(p2[1] - new_y) > 0.5:
-                    snapped[(i + 1) % n][1] = new_y
-                    changed = True
-            elif angle > 90.0 - tol_deg:
-                new_x = p1[0]
-                if abs(p2[0] - new_x) > 0.5:
-                    snapped[(i + 1) % n][0] = new_x
-                    changed = True
-        if not changed:
-            break
-
     for i in range(n):
         p1 = snapped[i]
         p2 = snapped[(i + 1) % n]
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        if max(abs(dx), abs(dy)) < 0.5:
+            continue
         angle = abs(math.degrees(math.atan2(abs(dy), abs(dx))))
         if angle < tol_deg:
             snapped[(i + 1) % n][1] = p1[1]
         elif angle > 90.0 - tol_deg:
             snapped[(i + 1) % n][0] = p1[0]
-
     return snapped.astype(np.int32)
 
 
 def _collapse_short_edges(pts: np.ndarray, min_len: float) -> np.ndarray:
+    """Removes spurious short micro-segments that cause staircase/zigzag
+    artifacts when each tiny edge gets snapped individually."""
     pts = pts.astype(np.float64).tolist()
     changed = True
     while changed and len(pts) > 4:
         changed = False
         for i in range(len(pts)):
-            p1 = pts[i]
-            p2 = pts[(i + 1) % len(pts)]
-            dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-            if dist < min_len:
+            p1, p2 = pts[i], pts[(i + 1) % len(pts)]
+            if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < min_len:
                 del pts[(i + 1) % len(pts)]
                 changed = True
                 break
@@ -208,12 +182,14 @@ def _collapse_short_edges(pts: np.ndarray, min_len: float) -> np.ndarray:
 
 
 def _snap_orthogonal_alternating(pts: np.ndarray) -> np.ndarray:
+    """Snaps each edge to horizontal or vertical, forcing strict H/V
+    alternation — prevents two same-orientation snaps in a row from
+    creating a staircase instead of one corner."""
     n = len(pts)
     snapped = pts.copy().astype(np.float64)
     last_orientation = None
     for i in range(n):
-        p1 = snapped[i]
-        p2 = snapped[(i + 1) % n]
+        p1, p2 = snapped[i], snapped[(i + 1) % n]
         dx, dy = p2[0] - p1[0], p2[1] - p1[1]
         if max(abs(dx), abs(dy)) < 0.5:
             continue
@@ -231,374 +207,230 @@ def _snap_orthogonal_alternating(pts: np.ndarray) -> np.ndarray:
     return snapped.astype(np.int32)
 
 
-def _remove_collinear_vertices(pts: np.ndarray, angle_tol_deg: float = 3.0) -> np.ndarray:
-    if len(pts) < 4:
-        return pts
-    pts_f = pts.astype(np.float64)
-    keep = []
-    n = len(pts_f)
-    for i in range(n):
-        prev_pt = pts_f[(i - 1) % n]
-        curr_pt = pts_f[i]
-        next_pt = pts_f[(i + 1) % n]
-        dx1 = curr_pt[0] - prev_pt[0]
-        dy1 = curr_pt[1] - prev_pt[1]
-        dx2 = next_pt[0] - curr_pt[0]
-        dy2 = next_pt[1] - curr_pt[1]
-        len1 = math.hypot(dx1, dy1)
-        len2 = math.hypot(dx2, dy2)
-        if len1 < 0.5 or len2 < 0.5:
-            keep.append(curr_pt)
-            continue
-        cross = dx1 * dy2 - dy1 * dx2
-        dot = dx1 * dx2 + dy1 * dy2
-        mag = len1 * len2
-        if mag < 1e-9:
-            keep.append(curr_pt)
-            continue
-        sin_angle = abs(cross / mag)
-        if sin_angle > math.sin(math.radians(angle_tol_deg)):
-            keep.append(curr_pt)
-    result = np.array(keep, dtype=np.float64) if keep else pts_f
-    return result if len(result) >= 4 else pts
+def _make_valid_simple_polygon(pts: np.ndarray) -> np.ndarray:
+    """Guarantees a valid, non-self-intersecting polygon using Shapely's
+    buffer(0) repair — fixes the bowtie/spike artifact that alternating
+    orthogonal snapping can produce on complex shapes. Falls back to the
+    convex hull (mathematically guaranteed simple) if repair still fails."""
+    try:
+        poly = Polygon(pts)
+        if poly.is_valid and poly.area > 0:
+            return pts
+        repaired = poly.buffer(0)
+        if repaired.geom_type == "Polygon" and repaired.area > 0:
+            coords = np.array(repaired.exterior.coords[:-1], dtype=np.int32)
+            if len(coords) >= 4:
+                return coords
+        hull = cv2.convexHull(pts.astype(np.int32))
+        return hull.reshape(-1, 2)
+    except Exception:
+        hull = cv2.convexHull(pts.astype(np.int32))
+        return hull.reshape(-1, 2)
 
 
-# ---------------------------------------------------------------------------
-# Preprocessing
-# ---------------------------------------------------------------------------
+# ============================================================
+# WALL DETECTION — multiple sensitivity profiles feed watershed
+# ============================================================
 
-def _preprocess_adaptive(gray: np.ndarray) -> Dict[str, np.ndarray]:
-    bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
-
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(bilateral)
-
-    adaptive_thresh = cv2.adaptiveThreshold(
-        enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 25, 12
-    )
-
-    denoised = cv2.fastNlMeansDenoising(enhanced, h=10, templateWindowSize=7, searchWindowSize=21)
-
-    return {
-        "gray": gray,
-        "bilateral": bilateral,
-        "enhanced": enhanced,
-        "denoised": denoised,
-        "adaptive_thresh": adaptive_thresh,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Wall detection - multi-strategy
-# ---------------------------------------------------------------------------
-
-def _detect_walls_canny_hough(gray: np.ndarray, w: int, h: int,
-                               canny_low: int = 30, canny_high: int = 100,
-                               hough_thresh: int = 25) -> np.ndarray:
-    edges = cv2.Canny(gray, canny_low, canny_high, apertureSize=3)
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    edges = cv2.dilate(edges, kernel_dilate, iterations=1)
-
+def _build_wall_mask(gray: np.ndarray, w: int, h: int,
+                      canny_low: int, canny_high: int,
+                      hough_thresh: int, min_wall_frac: float) -> np.ndarray:
+    """One wall-detection pass at a given sensitivity: Hough straight-line
+    detection (clean but can miss faint walls) unioned with Otsu threshold
+    (catches faint/gray walls Hough misses)."""
     total_px = w * h
+
+    edges = cv2.Canny(gray, canny_low, canny_high, apertureSize=3)
     min_line_len = max(15, int(math.sqrt(total_px) * 0.02))
     lines = cv2.HoughLinesP(
         edges, rho=1, theta=np.pi / 180,
         threshold=hough_thresh, minLineLength=min_line_len, maxLineGap=20,
     )
 
-    wall_mask = np.zeros((h, w), dtype=np.uint8)
-    if lines is None:
-        return wall_mask
-
+    hough_walls = np.zeros((h, w), dtype=np.uint8)
     ANGLE_TOL_DEG = 10.0
-    for line in lines:
-        coords = np.asarray(line).reshape(-1)
-        if coords.size < 4:
-            continue
-        x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
-        dx, dy = x2 - x1, y2 - y1
-        length = math.hypot(dx, dy)
-        if length < 5:
-            continue
-        angle = math.degrees(math.atan2(abs(dy), abs(dx)))
-        is_horizontal = angle < ANGLE_TOL_DEG
-        is_vertical = angle > 90 - ANGLE_TOL_DEG
-        if not (is_horizontal or is_vertical):
-            continue
-        if is_horizontal:
-            y2 = y1
-        else:
-            x2 = x1
-        thickness = max(2, min(5, int(length * 0.03)))
-        cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=thickness)
+    if lines is not None:
+        for line in lines:
+            coords = np.asarray(line).reshape(-1)
+            if coords.size < 4:
+                continue
+            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+            dx, dy = x2 - x1, y2 - y1
+            angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+            is_h = angle < ANGLE_TOL_DEG
+            is_v = angle > 90 - ANGLE_TOL_DEG
+            if not (is_h or is_v):
+                continue
+            if is_h:
+                y2 = y1
+            else:
+                x2 = x1
+            cv2.line(hough_walls, (x1, y1), (x2, y2), 255, thickness=4)
 
-    return wall_mask
-
-
-def _detect_walls_adaptive(adaptive_thresh: np.ndarray, w: int, h: int) -> np.ndarray:
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    closed = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_CLOSE, kernel_close, iterations=2)
-
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open, iterations=1)
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
-    total_px = w * h
-    min_area = total_px * 0.001
-    wall_mask = np.zeros((h, w), dtype=np.uint8)
+    _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    thresh_walls = np.zeros_like(dark)
+    min_wall_area_px = total_px * min_wall_frac
     for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] >= min_area:
-            wall_mask[labels == i] = 255
+        if stats[i, cv2.CC_STAT_AREA] >= min_wall_area_px:
+            thresh_walls[labels == i] = 255
 
-    return wall_mask
-
-
-def _detect_walls_morphological_gradient(gray: np.ndarray, w: int, h: int) -> np.ndarray:
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel)
-    _, wall_mask = cv2.threshold(grad, 30, 255, cv2.THRESH_BINARY)
-
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_k, iterations=1)
-
-    return wall_mask
+    walls = cv2.bitwise_or(hough_walls, thresh_walls)
+    if cv2.countNonZero(walls) < total_px * 0.01:
+        walls = dark
+    return walls
 
 
-def _combine_wall_masks(masks: list) -> np.ndarray:
-    if not masks:
-        return np.zeros((1, 1), dtype=np.uint8)
-    combined = masks[0].copy()
-    for m in masks[1:]:
-        combined = cv2.bitwise_or(combined, m)
-    return combined
-
-
-def _build_wall_mask_full(gray: np.ndarray, enhanced: np.ndarray,
-                           adaptive_thresh: np.ndarray,
-                           w: int, h: int, params: dict) -> np.ndarray:
-    canny_low = params.get("canny_low", 30)
-    canny_high = params.get("canny_high", 100)
-    hough_thresh = params.get("hough_thresh", 25)
-
-    hough_mask = _detect_walls_canny_hough(enhanced, w, h, canny_low, canny_high, hough_thresh)
-    adaptive_mask = _detect_walls_adaptive(adaptive_thresh, w, h)
-    gradient_mask = _detect_walls_morphological_gradient(enhanced, w, h)
-
-    combined = _combine_wall_masks([hough_mask, adaptive_mask, gradient_mask])
-
+def _build_wall_mask_double_line(gray: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Tuned for CAD-style double-line walls (two thin parallel lines with
+    a gap for wall thickness) — a large closing kernel bridges the gap
+    into one solid wall."""
+    edges = cv2.Canny(gray, 20, 80, apertureSize=3)
     total_px = w * h
-    if cv2.countNonZero(combined) < total_px * 0.005:
-        _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
-        min_wall_area = total_px * 0.002
-        for i in range(1, num_labels):
-            if stats[i, cv2.CC_STAT_AREA] >= min_wall_area:
-                combined[labels == i] = 255
+    lines = cv2.HoughLinesP(
+        edges, rho=1, theta=np.pi / 180,
+        threshold=15, minLineLength=max(10, int(math.sqrt(total_px) * 0.015)),
+        maxLineGap=8,
+    )
 
-    close_size = params.get("close_size", 9)
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (close_size, close_size))
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, close_k, iterations=2)
+    wall_mask = np.zeros((h, w), dtype=np.uint8)
+    if lines is not None:
+        for line in lines:
+            coords = np.asarray(line).reshape(-1)
+            if coords.size < 4:
+                continue
+            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+            dx, dy = x2 - x1, y2 - y1
+            angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+            if not (angle < 10 or angle > 80):
+                continue
+            if angle < 10:
+                y2 = y1
+            else:
+                x2 = x1
+            cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=2)
 
-    return combined
+    bridge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, bridge_k, iterations=2)
+    return wall_mask
 
-
-# ---------------------------------------------------------------------------
-# Room extraction from wall mask
-# ---------------------------------------------------------------------------
 
 def _remove_border_region(rooms_bin: np.ndarray) -> np.ndarray:
+    """Floods inward from the image border and blanks out whatever open
+    region touches it — the page margin/scan background can never be
+    mistaken for a room."""
     h, w = rooms_bin.shape
     flood_mask = np.zeros((h + 2, w + 2), np.uint8)
     filled = rooms_bin.copy()
-
     seeds = [
         (0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1),
         (0, w // 2), (h - 1, w // 2), (h // 2, 0), (h // 2, w - 1),
-        (0, w // 4), (0, 3 * w // 4),
-        (h - 1, w // 4), (h - 1, 3 * w // 4),
-        (h // 4, 0), (3 * h // 4, 0),
-        (h // 4, w - 1), (3 * h // 4, w - 1),
     ]
     for (sy, sx) in seeds:
-        sy = max(0, min(sy, h - 1))
-        sx = max(0, min(sx, w - 1))
         if filled[sy, sx] == 255:
             cv2.floodFill(filled, flood_mask, (sx, sy), 128)
-
     result = rooms_bin.copy()
     result[filled == 128] = 0
     return result
 
 
-def _separate_rooms_watershed(rooms_bin: np.ndarray, w: int, h: int,
-                               dist_thresh: float = 0.35) -> np.ndarray:
-    smooth_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+# ============================================================
+# WATERSHED SEGMENTATION — wall mask -> room polygons
+# ============================================================
+
+def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
+                          px_to_meter: float, min_room_area_px: float,
+                          dist_thresh: float) -> List[Dict[str, Any]]:
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, close_k, iterations=2)
+
+    rooms_bin = cv2.bitwise_not(walls)
+    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, open_k, iterations=1)
+    rooms_bin = _remove_border_region(rooms_bin)
+
+    smooth_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_CLOSE, smooth_k, iterations=1)
     rooms_bin = cv2.morphologyEx(rooms_bin, cv2.MORPH_OPEN, smooth_k, iterations=1)
 
+    # ---- Distance transform + watershed: separates rooms whose shared
+    # wall has gaps/breaks, by seeding from each room's confident interior
+    # peak rather than trusting the outer contour alone ----
     dist = cv2.distanceTransform(rooms_bin, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-
     _, sure_fg = cv2.threshold(dist_norm, dist_thresh, 1.0, cv2.THRESH_BINARY)
     sure_fg = (sure_fg * 255).astype(np.uint8)
 
-    sure_bg = cv2.dilate(rooms_bin, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=3)
-
-    unknown = cv2.subtract(sure_bg, sure_fg)
-
     num_markers, markers = cv2.connectedComponents(sure_fg)
     if num_markers <= 1:
-        return rooms_bin
+        return []
 
     markers = markers + 1
+    unknown = cv2.subtract(rooms_bin, sure_fg)
     markers[unknown == 255] = 0
 
     img_for_ws = cv2.cvtColor(rooms_bin, cv2.COLOR_GRAY2BGR)
     cv2.watershed(img_for_ws, markers)
 
-    result = np.zeros_like(rooms_bin)
-    for label in range(2, markers.max() + 1):
-        result[markers == label] = 255
-
-    return result
-
-
-def _polygon_self_intersects(pts: np.ndarray) -> bool:
-    """Checks whether any two non-adjacent edges of the polygon cross —
-    catches the bowtie/spike artifact that alternating orthogonal
-    snapping can occasionally produce on complex shapes."""
-    def ccw(a, b, c):
-        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
-
-    def segments_intersect(p1, p2, p3, p4):
-        return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
-
-    n = len(pts)
-    for i in range(n):
-        a1, a2 = pts[i], pts[(i + 1) % n]
-        for j in range(i + 1, n):
-            if j == i or (j + 1) % n == i or j == (i + 1) % n:
-                continue  # skip adjacent/shared-vertex edges
-            b1, b2 = pts[j], pts[(j + 1) % n]
-            if segments_intersect(a1, a2, b1, b2):
-                return True
-    return False
-
-
-def _approximate_polygon(contour: np.ndarray, fill_ratio: float,
-                         cnt_area: float, perimeter: float) -> Optional[np.ndarray]:
-    if fill_ratio > 0.72:
-        rect = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(rect)
-        return box.reshape(-1, 1, 2).astype(np.int32)
-
-    epsilon = 0.02 * perimeter
-    approx = cv2.approxPolyDP(contour, epsilon, True)
-    escalate = 0.02
-    max_attempts = 6
-    attempt = 0
-    while len(approx) > 8 and escalate < 0.08 and attempt < max_attempts:
-        escalate += 0.01
-        approx = cv2.approxPolyDP(contour, escalate * perimeter, True)
-        attempt += 1
-    if len(approx) < 4:
-        return None
-    approx_pts = approx.reshape(-1, 2)
-
-    min_edge_len = max(8.0, perimeter * 0.02)
-    approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
-    if len(approx_pts) < 4:
-        return None
-
-    snapped = _snap_orthogonal_alternating(approx_pts)
-
-    # Guard: if alternating snap produced a self-intersecting
-    # bowtie/spike, fall back to the simpler per-edge snap
-    # instead — less crisp, but never structurally invalid.
-    if _polygon_self_intersects(snapped):
-        snapped = _snap_orthogonal_strict(approx_pts.astype(np.int32))
-        if _polygon_self_intersects(snapped):
-            # Still broken — use the unsimplified points rather
-            # than ship a self-crossing polygon downstream.
-            snapped = approx_pts.astype(np.int32)
-
-    return snapped.reshape(-1, 1, 2)
-
-
-def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
-                           px_to_meter: float, min_room_area_px: float,
-                           dist_thresh: float) -> List[Dict[str, Any]]:
-    rooms_bin = cv2.bitwise_not(walls)
-    rooms_bin = _remove_border_region(rooms_bin)
-
-    separate_mask = _separate_rooms_watershed(rooms_bin, w, h, dist_thresh)
-
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        separate_mask, connectivity=8
-    )
-
     rooms = []
-    for label_id in range(1, num_labels):
-        area = stats[label_id, cv2.CC_STAT_AREA]
-        if area < min_room_area_px:
-            continue
-
-        comp_mask = np.uint8(labels == label_id) * 255
-
-        comp_mask = cv2.morphologyEx(comp_mask, cv2.MORPH_CLOSE,
-                                      cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
-                                      iterations=1)
-
-        cnts, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for label in range(2, markers.max() + 1):
+        mask = np.uint8(markers == label) * 255
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not cnts:
             continue
         cnt = max(cnts, key=cv2.contourArea)
-        cnt_area = cv2.contourArea(cnt)
-        if cnt_area < min_room_area_px:
+        area = cv2.contourArea(cnt)
+        if area < min_room_area_px:
             continue
 
         rect = cv2.minAreaRect(cnt)
         (_, _), (rect_w, rect_h), _ = rect
         rect_area = rect_w * rect_h
-        fill_ratio = cnt_area / rect_area if rect_area > 0 else 0
-        perimeter = cv2.arcLength(cnt, True)
+        fill_ratio = area / rect_area if rect_area > 0 else 0
 
-        approx = _approximate_polygon(cnt, fill_ratio, cnt_area, perimeter)
-        if approx is None or len(approx) < 4:
-            continue
+        if fill_ratio > 0.72:
+            box = cv2.boxPoints(rect)
+            approx = box.reshape(-1, 1, 2).astype(np.int32)
+        else:
+            approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
+            escalate = 0.02
+            while len(approx) > 10 and escalate < 0.08:
+                escalate += 0.01
+                approx = cv2.approxPolyDP(cnt, escalate * cv2.arcLength(cnt, True), True)
+            if len(approx) < 4:
+                continue
+
+            approx_pts = approx.reshape(-1, 2)
+            perim = cv2.arcLength(cnt, True)
+            min_edge_len = max(8.0, perim * 0.02)
+            approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
+            if len(approx_pts) < 4:
+                continue
+
+            snapped = _snap_orthogonal_alternating(approx_pts)
+            snapped = _make_valid_simple_polygon(snapped)  # <- Shapely repair
+            approx = snapped.reshape(-1, 1, 2)
 
         xs_px = [int(pt[0][0]) for pt in approx]
         ys_px = [int(pt[0][1]) for pt in approx]
-
-        edge_margin = max(3, int(min(w, h) * 0.005))
+        edge_margin = 3
         if (min(xs_px) <= edge_margin or min(ys_px) <= edge_margin or
                 max(xs_px) >= w - edge_margin or max(ys_px) >= h - edge_margin):
             continue
 
-        raw_pts = [pt[0] for pt in approx]
-        pts_m = [[(px - w / 2.0) / px_to_meter, (py - h / 2.0) / px_to_meter] for px, py in raw_pts]
+        pts_m = [[(px - w / 2.0) / px_to_meter, (py - h / 2.0) / px_to_meter]
+                  for px, py in [pt[0] for pt in approx]]
         xs = [p[0] for p in pts_m]
         ys = [p[1] for p in pts_m]
         bb_w = max(xs) - min(xs)
         bb_h = max(ys) - min(ys)
-
-        if bb_w < 0.5 or bb_h < 0.5:
+        if bb_w < 0.8 or bb_h < 0.8 or bb_w > 18 or bb_h > 18:
             continue
-        if bb_w > 25 or bb_h > 25:
-            continue
-
         min_side, max_side = min(bb_w, bb_h), max(bb_w, bb_h)
-        if max_side > 0 and min_side / max_side < 0.10:
+        if max_side > 0 and min_side / max_side < 0.15:
             continue
-
         img_w_m, img_h_m = w / px_to_meter, h / px_to_meter
-        if bb_w > img_w_m * 0.90 and bb_h > img_h_m * 0.90:
-            continue
-
-        polygon_m = pts_m
-        area_m2 = round(_polygon_area(polygon_m), 2)
-        if area_m2 < 0.3:
+        if bb_w > img_w_m * 0.85 and bb_h > img_h_m * 0.85:
             continue
 
         rooms.append({
@@ -608,132 +440,57 @@ def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
             "centerY": sum(ys) / len(ys),
             "elevationZ": 0.0,
             "isOpenSpace": False,
-            "walls": polygon_to_walls(polygon_m),
-            "area": area_m2,
-            "_px_area": float(cnt_area),
-            "_polygon": [(p[0], p[1]) for p in polygon_m],
+            "walls": polygon_to_walls(pts_m),
+            "area": round(bb_w * bb_h, 2),
         })
-
-    rooms = _deduplicate_rooms(rooms)
-
-    rooms.sort(key=lambda r: r.get("_px_area", 0), reverse=True)
-    for i, r in enumerate(rooms):
-        r["label"] = f"Room {i + 1}"
-        r.pop("_px_area", None)
-        r.pop("_polygon", None)
-
     return rooms
 
 
-def _deduplicate_rooms(rooms: List[Dict[str, Any]],
-                       overlap_threshold: float = 0.5) -> List[Dict[str, Any]]:
-    if len(rooms) <= 1:
-        return rooms
-
-    rooms_sorted = sorted(rooms, key=lambda r: r.get("_px_area", r["area"]), reverse=True)
-    kept: List[Dict[str, Any]] = []
-
-    for room in rooms_sorted:
-        poly = room.get("_polygon", [])
-        if not poly:
-            kept.append(room)
-            continue
-        dominated = False
-        for kept_room in kept:
-            kept_poly = kept_room.get("_polygon", [])
-            if not kept_poly:
-                continue
-            if _polygons_overlap(poly, kept_poly):
-                room_area = room["area"]
-                kept_area = kept_room["area"]
-                if kept_area > 0:
-                    overlap_ratio = min(room_area, kept_area) / max(room_area, kept_area)
-                    if overlap_ratio > overlap_threshold:
-                        dominated = True
-                        break
-        if not dominated:
-            kept.append(room)
-
-    return kept
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
+# ============================================================
+# SCORING + MULTI-PASS ORCHESTRATION
+# ============================================================
 
 def _score_result(rooms: List[Dict[str, Any]], w: int, h: int, px_to_meter: float) -> float:
     if not rooms:
         return -1.0
-
     total_area = sum(r["area"] for r in rooms)
     image_area = (w / px_to_meter) * (h / px_to_meter)
     coverage = total_area / image_area if image_area > 0 else 0
-    if coverage < 0.10 or coverage > 1.10:
+    if coverage < 0.15 or coverage > 1.05:
         return -1.0
 
-    bboxes = []
-    for r in rooms:
-        xs = [p["x1"] for p in r.get("walls", [])]
-        ys = [p["y1"] for p in r.get("walls", [])]
-        if not xs or not ys:
-            continue
-        bboxes.append((min(xs), min(ys), max(xs), max(ys)))
-
     overlap_penalty = 0.0
-    for i in range(len(bboxes)):
-        for j in range(i + 1, len(bboxes)):
-            inter = _bbox_intersection_area(bboxes[i], bboxes[j])
-            area_i = (bboxes[i][2] - bboxes[i][0]) * (bboxes[i][3] - bboxes[i][1])
-            area_j = (bboxes[j][2] - bboxes[j][0]) * (bboxes[j][3] - bboxes[j][1])
-            min_area = min(area_i, area_j) if min(area_i, area_j) > 0 else 1
-            overlap_penalty += inter / min_area
+    for i in range(len(rooms)):
+        for j in range(i + 1, len(rooms)):
+            xi1 = rooms[i]["centerX"] - math.sqrt(rooms[i]["area"]) / 2
+            xi2 = rooms[i]["centerX"] + math.sqrt(rooms[i]["area"]) / 2
+            yi1 = rooms[i]["centerY"] - math.sqrt(rooms[i]["area"]) / 2
+            yi2 = rooms[i]["centerY"] + math.sqrt(rooms[i]["area"]) / 2
+            xj1 = rooms[j]["centerX"] - math.sqrt(rooms[j]["area"]) / 2
+            xj2 = rooms[j]["centerX"] + math.sqrt(rooms[j]["area"]) / 2
+            yj1 = rooms[j]["centerY"] - math.sqrt(rooms[j]["area"]) / 2
+            yj2 = rooms[j]["centerY"] + math.sqrt(rooms[j]["area"]) / 2
+            ox = max(0, min(xi2, xj2) - max(xi1, xj1))
+            oy = max(0, min(yi2, yj2) - max(yi1, yj1))
+            if ox > 0 and oy > 0:
+                overlap_penalty += (ox * oy) / min(rooms[i]["area"], rooms[j]["area"])
 
-    sliver_penalty = 0.0
     areas = [r["area"] for r in rooms]
-    if areas:
-        sorted_areas = sorted(areas)
-        median_area = sorted_areas[len(sorted_areas) // 2]
-        for a in areas:
-            if median_area > 0 and a < median_area * 0.10:
-                sliver_penalty += 0.4
+    median_area = sorted(areas)[len(areas) // 2]
+    sliver_penalty = sum(0.3 for r in rooms if median_area > 0 and r["area"] < median_area * 0.15)
 
-    rectilinearity_bonus = 0.0
-    for r in rooms:
-        walls = r.get("walls", [])
-        if not walls:
-            continue
-        aligned = 0
-        for wall in walls:
-            dx = abs(wall["x2"] - wall["x1"])
-            dy = abs(wall["y2"] - wall["y1"])
-            if dx < 0.01 or dy < 0.01:
-                aligned += 1
-        if walls:
-            rectilinearity_bonus += (aligned / len(walls)) * 0.1
+    coverage_score = 1.0 - abs(coverage - 0.65)
+    room_count_score = min(len(rooms), 8) / 8.0
 
-    size_regularity = 0.0
-    if areas and len(areas) > 1:
-        sorted_areas = sorted(areas)
-        median = sorted_areas[len(sorted_areas) // 2]
-        if median > 0:
-            within_range = sum(1 for a in areas if 0.2 < a / median < 5.0)
-            size_regularity = (within_range / len(areas)) * 0.15
-
-    coverage_score = 1.0 - abs(coverage - 0.55)
-    room_count_score = min(len(rooms), 10) / 10.0
-
-    score = coverage_score * 0.45 + room_count_score * 0.20
-    score += rectilinearity_bonus
-    score += size_regularity
-    score -= overlap_penalty * 0.4
+    score = coverage_score * 0.55 + room_count_score * 0.20
+    score -= overlap_penalty * 0.5
     score -= sliver_penalty
+    return score
 
-    return max(score, -1.0)
 
-
-# ---------------------------------------------------------------------------
+# ============================================================
 # Main segmentation pipeline
-# ---------------------------------------------------------------------------
+# ============================================================
 
 def _result_is_plausible(rooms: list, orig_w: int, orig_h: int, px_to_meter: float) -> bool:
     if not rooms or len(rooms) < 2:
@@ -744,99 +501,44 @@ def _result_is_plausible(rooms: list, orig_w: int, orig_h: int, px_to_meter: flo
     return 0.15 <= coverage <= 1.05
 
 
-def _try_parameter_set(args: tuple) -> Tuple[float, List[Dict[str, Any]]]:
-    params, prep, w, h, px_to_meter, min_room_area_px = args
-    try:
-        walls = _build_wall_mask_full(
-            prep["gray"], prep["enhanced"], prep["adaptive_thresh"],
-            w, h, params
-        )
-        rooms = _rooms_from_wall_mask(
-            walls, w, h, px_to_meter, min_room_area_px, params["dist_thresh"]
-        )
-        score = _score_result(rooms, w, h, px_to_meter)
-        return score, rooms
-    except Exception as e:
-        logger.debug("Parameter set failed: %s - %s", params, e)
-        return -1.0, []
-
-
 def _segment_rooms(gray: np.ndarray, w: int, h: int,
                    px_to_meter: float) -> List[Dict[str, Any]]:
     total_px = w * h
-    min_room_area_px = total_px * 0.006
-
-    prep = _preprocess_adaptive(gray)
+    min_room_area_px = total_px * 0.008
 
     PARAM_SETS = [
-        {"canny_low": 30, "canny_high": 100, "hough_thresh": 25, "close_size": 9, "dist_thresh": 0.33},
-        {"canny_low": 50, "canny_high": 150, "hough_thresh": 40, "close_size": 9, "dist_thresh": 0.35},
-        {"canny_low": 20, "canny_high": 80, "hough_thresh": 20, "close_size": 11, "dist_thresh": 0.30},
-        {"canny_low": 50, "canny_high": 150, "hough_thresh": 40, "close_size": 7, "dist_thresh": 0.40},
-        {"canny_low": 40, "canny_high": 120, "hough_thresh": 30, "close_size": 13, "dist_thresh": 0.28},
-        {"canny_low": 25, "canny_high": 90, "hough_thresh": 18, "close_size": 15, "dist_thresh": 0.25},
+        {"canny_low": 30, "canny_high": 100, "hough_thresh": 25, "min_wall_frac": 0.003, "dist_thresh": 0.35},
+        {"canny_low": 50, "canny_high": 150, "hough_thresh": 40, "min_wall_frac": 0.003, "dist_thresh": 0.35},
+        {"canny_low": 20, "canny_high": 80, "hough_thresh": 20, "min_wall_frac": 0.002, "dist_thresh": 0.30},
+        {"canny_low": 50, "canny_high": 150, "hough_thresh": 40, "min_wall_frac": 0.004, "dist_thresh": 0.45},
     ]
 
     best_rooms: List[Dict[str, Any]] = []
     best_score = -1.0
 
-    tasks = [
-        (params, prep, w, h, px_to_meter, min_room_area_px)
-        for params in PARAM_SETS
-    ]
-
-    max_workers = min(len(PARAM_SETS), os.cpu_count() or 4, 4)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_try_parameter_set, t): i for i, t in enumerate(tasks)}
-        for future in as_completed(futures):
-            try:
-                score, rooms = future.result(timeout=30)
-                if score > best_score:
-                    best_score = score
-                    best_rooms = rooms
-            except Exception as e:
-                logger.debug("Parameter set future failed: %s", e)
-
-    if best_score < 0.35:
-        logger.info("Low score %.2f, trying CAD double-line fallback", best_score)
+    for params in PARAM_SETS:
         try:
-            denoised = prep.get("denoised", prep["enhanced"])
-            edges = cv2.Canny(denoised, 20, 80, apertureSize=3)
-            min_line_len = max(10, int(math.sqrt(total_px) * 0.015))
-            lines = cv2.HoughLinesP(
-                edges, rho=1, theta=np.pi / 180,
-                threshold=15, minLineLength=min_line_len, maxLineGap=8,
-            )
-            cad_walls = np.zeros((h, w), dtype=np.uint8)
-            if lines is not None:
-                for line in lines:
-                    coords = np.asarray(line).reshape(-1)
-                    if coords.size < 4:
-                        continue
-                    x1, y1, x2, y2 = (int(coords[0]), int(coords[1]),
-                                        int(coords[2]), int(coords[3]))
-                    dx, dy = x2 - x1, y2 - y1
-                    length = math.hypot(dx, dy)
-                    if length < 5:
-                        continue
-                    angle = math.degrees(math.atan2(abs(dy), abs(dx)))
-                    if not (angle < 10 or angle > 80):
-                        continue
-                    if angle < 10:
-                        y2 = y1
-                    else:
-                        x2 = x1
-                    cv2.line(cad_walls, (x1, y1), (x2, y2), 255, thickness=2)
+            walls = _build_wall_mask(gray, w, h, params["canny_low"], params["canny_high"],
+                                      params["hough_thresh"], params["min_wall_frac"])
+            rooms = _rooms_from_wall_mask(walls, w, h, px_to_meter, min_room_area_px,
+                                          params["dist_thresh"])
+            score = _score_result(rooms, w, h, px_to_meter)
+            if score > best_score:
+                best_score = score
+                best_rooms = rooms
+        except Exception:
+            continue
 
-            bridge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-            cad_walls = cv2.morphologyEx(cad_walls, cv2.MORPH_CLOSE, bridge_k, iterations=2)
-            cad_rooms = _rooms_from_wall_mask(cad_walls, w, h, px_to_meter, min_room_area_px, 0.33)
+    if best_score < 0.4:
+        try:
+            cad_walls = _build_wall_mask_double_line(gray, w, h)
+            cad_rooms = _rooms_from_wall_mask(cad_walls, w, h, px_to_meter, min_room_area_px, 0.35)
             cad_score = _score_result(cad_rooms, w, h, px_to_meter)
             if cad_score > best_score:
                 best_score = cad_score
                 best_rooms = cad_rooms
-        except Exception as e:
-            logger.warning("CAD fallback failed: %s", e)
+        except Exception:
+            pass
 
     return best_rooms
 
@@ -1011,7 +713,7 @@ async def process_layout_sample(floors: int = Query(1)):
         simplified = _rdp_simplify(pts_px, eps_px=5.0)
         if len(simplified) < 3:
             simplified = pts_px
-        snapped = _snap_orthogonal_strict(np.array(simplified, dtype=np.int32).reshape(-1, 2))
+        snapped = _snap_orthogonal(np.array(simplified, dtype=np.int32).reshape(-1, 2))
         snapped_pts = snapped.tolist()
 
         pts_m = [[(px - cx) / px_to_meter, (py - cy) / px_to_meter] for px, py in snapped_pts]
