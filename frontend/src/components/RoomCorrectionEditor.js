@@ -152,7 +152,7 @@ export default function RoomCorrectionEditor({
   imageUrl,
   onConfirm,
   onCancel,
-  onSave,
+  onSaveAndGoBack,
   saving,
 }) {
   const [imgDims, setImgDims] = useState(null);
@@ -683,13 +683,13 @@ export default function RoomCorrectionEditor({
           >
             Cancel
           </button>
-          {onSave && (
+          {onSaveAndGoBack && (
             <button
-              onClick={onSave}
+              onClick={onSaveAndGoBack}
               disabled={saving}
               className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-50"
             >
-              {saving ? "Saving..." : "Save"}
+              {saving ? "Saving..." : "Save & Return"}
             </button>
           )}
           <button

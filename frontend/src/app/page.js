@@ -111,6 +111,13 @@ export default function HomePage() {
     setShowEditor(false);
   }, []);
 
+  const handleSaveAndGoBack = useCallback(async () => {
+    await handleSave();
+    if (layoutData) {
+      setShowEditor(false);
+    }
+  }, [handleSave, layoutData]);
+
   const handleCorrectionCancel = useCallback(() => {
     setShowEditor(false);
   }, []);
@@ -310,6 +317,7 @@ export default function HomePage() {
             onConfirm={handleCorrectionConfirm}
             onCancel={handleCorrectionCancel}
             onSave={handleSave}
+            onSaveAndGoBack={handleSaveAndGoBack}
             saving={saving}
           />
         </div>
@@ -383,6 +391,7 @@ export default function HomePage() {
                   onConfirm={handleCorrectionConfirm}
                   onCancel={handleCorrectionCancel}
                   onSave={handleSave}
+                  onSaveAndGoBack={handleSaveAndGoBack}
                   saving={saving}
                 />
               ) : (
