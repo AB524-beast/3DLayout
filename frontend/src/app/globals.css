@@ -25,6 +25,10 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 4px;
 }
@@ -64,4 +68,23 @@ body {
 
 .animate-scale-in {
   animation: scaleIn 0.4s ease-out both;
+}
+
+@supports (-webkit-touch-callout: none) {
+  .fixed {
+    position: fixed;
+    height: -webkit-fill-available;
+  }
+}
+
+html, body {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+canvas {
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }

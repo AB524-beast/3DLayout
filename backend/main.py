@@ -1,8 +1,9 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import cv2
 import math
@@ -10,6 +11,7 @@ import json
 import os
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tracing import setup_tracing
 from database import save_project, save_rooms
@@ -37,6 +39,10 @@ app.add_middleware(
 
 logger.info("CORS origins: %s", _cors_origins)
 
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_IMAGE_DIMENSION = 8192
+MIN_IMAGE_DIMENSION = 64
+
 
 @app.get("/")
 async def root():
@@ -47,6 +53,10 @@ async def root():
 async def health():
     return {"status": "ok", "model_available": is_model_available()}
 
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 
 class RoomSpecification(BaseModel):
     name: str
@@ -91,7 +101,7 @@ def polygon_to_walls(points_m: List[List[float]]) -> List[Dict[str, float]]:
     return walls
 
 
-def _polygon_area(pts):
+def _polygon_area(pts: List[Tuple[float, float]]) -> float:
     n = len(pts)
     area = 0.0
     for i in range(n):
@@ -111,6 +121,30 @@ def _bbox_intersection_area(bb1, bb2):
     x_overlap = max(0, min(bb1[2], bb2[2]) - max(bb1[0], bb2[0]))
     y_overlap = max(0, min(bb1[3], bb2[3]) - max(bb1[1], bb2[1]))
     return x_overlap * y_overlap
+
+
+def _point_in_polygon(px: float, py: float, polygon: List[Tuple[float, float]]) -> bool:
+    n = len(polygon)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _polygons_overlap(poly_a: List[Tuple[float, float]],
+                      poly_b: List[Tuple[float, float]]) -> bool:
+    for pt in poly_b:
+        if _point_in_polygon(pt[0], pt[1], poly_a):
+            return True
+    for pt in poly_a:
+        if _point_in_polygon(pt[0], pt[1], poly_b):
+            return True
+    return False
 
 
 def _snap_orthogonal_strict(pts: np.ndarray, tol_deg: float = 10.0) -> np.ndarray:
@@ -197,6 +231,38 @@ def _snap_orthogonal_alternating(pts: np.ndarray) -> np.ndarray:
     return snapped.astype(np.int32)
 
 
+def _remove_collinear_vertices(pts: np.ndarray, angle_tol_deg: float = 3.0) -> np.ndarray:
+    if len(pts) < 4:
+        return pts
+    pts_f = pts.astype(np.float64)
+    keep = []
+    n = len(pts_f)
+    for i in range(n):
+        prev_pt = pts_f[(i - 1) % n]
+        curr_pt = pts_f[i]
+        next_pt = pts_f[(i + 1) % n]
+        dx1 = curr_pt[0] - prev_pt[0]
+        dy1 = curr_pt[1] - prev_pt[1]
+        dx2 = next_pt[0] - curr_pt[0]
+        dy2 = next_pt[1] - curr_pt[1]
+        len1 = math.hypot(dx1, dy1)
+        len2 = math.hypot(dx2, dy2)
+        if len1 < 0.5 or len2 < 0.5:
+            keep.append(curr_pt)
+            continue
+        cross = dx1 * dy2 - dy1 * dx2
+        dot = dx1 * dx2 + dy1 * dy2
+        mag = len1 * len2
+        if mag < 1e-9:
+            keep.append(curr_pt)
+            continue
+        sin_angle = abs(cross / mag)
+        if sin_angle > math.sin(math.radians(angle_tol_deg)):
+            keep.append(curr_pt)
+    result = np.array(keep, dtype=np.float64) if keep else pts_f
+    return result if len(result) >= 4 else pts
+
+
 # ---------------------------------------------------------------------------
 # Preprocessing
 # ---------------------------------------------------------------------------
@@ -212,10 +278,13 @@ def _preprocess_adaptive(gray: np.ndarray) -> Dict[str, np.ndarray]:
         cv2.THRESH_BINARY_INV, 25, 12
     )
 
+    denoised = cv2.fastNlMeansDenoising(enhanced, h=10, templateWindowSize=7, searchWindowSize=21)
+
     return {
         "gray": gray,
         "bilateral": bilateral,
         "enhanced": enhanced,
+        "denoised": denoised,
         "adaptive_thresh": adaptive_thresh,
     }
 
@@ -249,6 +318,9 @@ def _detect_walls_canny_hough(gray: np.ndarray, w: int, h: int,
             continue
         x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
         dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 5:
+            continue
         angle = math.degrees(math.atan2(abs(dy), abs(dx)))
         is_horizontal = angle < ANGLE_TOL_DEG
         is_vertical = angle > 90 - ANGLE_TOL_DEG
@@ -258,7 +330,8 @@ def _detect_walls_canny_hough(gray: np.ndarray, w: int, h: int,
             y2 = y1
         else:
             x2 = x1
-        cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=4)
+        thickness = max(2, min(5, int(length * 0.03)))
+        cv2.line(wall_mask, (x1, y1), (x2, y2), 255, thickness=thickness)
 
     return wall_mask
 
@@ -294,16 +367,16 @@ def _detect_walls_morphological_gradient(gray: np.ndarray, w: int, h: int) -> np
 
 def _combine_wall_masks(masks: list) -> np.ndarray:
     if not masks:
-        return np.zeros_like(masks[0]) if masks else np.zeros((1, 1), dtype=np.uint8)
-    combined = masks[0]
+        return np.zeros((1, 1), dtype=np.uint8)
+    combined = masks[0].copy()
     for m in masks[1:]:
         combined = cv2.bitwise_or(combined, m)
     return combined
 
 
 def _build_wall_mask_full(gray: np.ndarray, enhanced: np.ndarray,
-                          adaptive_thresh: np.ndarray,
-                          w: int, h: int, params: dict) -> np.ndarray:
+                           adaptive_thresh: np.ndarray,
+                           w: int, h: int, params: dict) -> np.ndarray:
     canny_low = params.get("canny_low", 30)
     canny_high = params.get("canny_high", 100)
     hough_thresh = params.get("hough_thresh", 25)
@@ -391,9 +464,38 @@ def _separate_rooms_watershed(rooms_bin: np.ndarray, w: int, h: int,
     return result
 
 
+def _approximate_polygon(contour: np.ndarray, fill_ratio: float,
+                         cnt_area: float, perimeter: float) -> Optional[np.ndarray]:
+    if fill_ratio > 0.72:
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        return box.reshape(-1, 1, 2).astype(np.int32)
+
+    epsilon = 0.02 * perimeter
+    approx = cv2.approxPolyDP(contour, epsilon, True)
+    escalate = 0.02
+    max_attempts = 6
+    attempt = 0
+    while len(approx) > 8 and escalate < 0.08 and attempt < max_attempts:
+        escalate += 0.01
+        approx = cv2.approxPolyDP(contour, escalate * perimeter, True)
+        attempt += 1
+    if len(approx) < 4:
+        return None
+    approx_pts = approx.reshape(-1, 2)
+
+    min_edge_len = max(8.0, perimeter * 0.02)
+    approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
+    if len(approx_pts) < 4:
+        return None
+
+    snapped = _snap_orthogonal_alternating(approx_pts)
+    return snapped.reshape(-1, 1, 2)
+
+
 def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
-                          px_to_meter: float, min_room_area_px: float,
-                          dist_thresh: float) -> List[Dict[str, Any]]:
+                           px_to_meter: float, min_room_area_px: float,
+                           dist_thresh: float) -> List[Dict[str, Any]]:
     rooms_bin = cv2.bitwise_not(walls)
     rooms_bin = _remove_border_region(rooms_bin)
 
@@ -427,27 +529,11 @@ def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
         (_, _), (rect_w, rect_h), _ = rect
         rect_area = rect_w * rect_h
         fill_ratio = cnt_area / rect_area if rect_area > 0 else 0
+        perimeter = cv2.arcLength(cnt, True)
 
-        if fill_ratio > 0.72:
-            box = cv2.boxPoints(rect)
-            approx = box.reshape(-1, 1, 2).astype(np.int32)
-        else:
-            epsilon = 0.02 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            escalate = 0.02
-            while len(approx) > 8 and escalate < 0.08:
-                escalate += 0.01
-                approx = cv2.approxPolyDP(cnt, escalate * cv2.arcLength(cnt, True), True)
-            if len(approx) < 4:
-                continue
-            approx_pts = approx.reshape(-1, 2)
-            perim = cv2.arcLength(cnt, True)
-            min_edge_len = max(8.0, perim * 0.02)
-            approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
-            if len(approx_pts) < 4:
-                continue
-            snapped = _snap_orthogonal_alternating(approx_pts)
-            approx = snapped.reshape(-1, 1, 2)
+        approx = _approximate_polygon(cnt, fill_ratio, cnt_area, perimeter)
+        if approx is None or len(approx) < 4:
+            continue
 
         xs_px = [int(pt[0][0]) for pt in approx]
         ys_px = [int(pt[0][1]) for pt in approx]
@@ -492,14 +578,50 @@ def _rooms_from_wall_mask(walls: np.ndarray, w: int, h: int,
             "walls": polygon_to_walls(polygon_m),
             "area": area_m2,
             "_px_area": float(cnt_area),
+            "_polygon": [(p[0], p[1]) for p in polygon_m],
         })
+
+    rooms = _deduplicate_rooms(rooms)
 
     rooms.sort(key=lambda r: r.get("_px_area", 0), reverse=True)
     for i, r in enumerate(rooms):
         r["label"] = f"Room {i + 1}"
         r.pop("_px_area", None)
+        r.pop("_polygon", None)
 
     return rooms
+
+
+def _deduplicate_rooms(rooms: List[Dict[str, Any]],
+                       overlap_threshold: float = 0.5) -> List[Dict[str, Any]]:
+    if len(rooms) <= 1:
+        return rooms
+
+    rooms_sorted = sorted(rooms, key=lambda r: r.get("_px_area", r["area"]), reverse=True)
+    kept: List[Dict[str, Any]] = []
+
+    for room in rooms_sorted:
+        poly = room.get("_polygon", [])
+        if not poly:
+            kept.append(room)
+            continue
+        dominated = False
+        for kept_room in kept:
+            kept_poly = kept_room.get("_polygon", [])
+            if not kept_poly:
+                continue
+            if _polygons_overlap(poly, kept_poly):
+                room_area = room["area"]
+                kept_area = kept_room["area"]
+                if kept_area > 0:
+                    overlap_ratio = min(room_area, kept_area) / max(room_area, kept_area)
+                    if overlap_ratio > overlap_threshold:
+                        dominated = True
+                        break
+        if not dominated:
+            kept.append(room)
+
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -518,8 +640,8 @@ def _score_result(rooms: List[Dict[str, Any]], w: int, h: int, px_to_meter: floa
 
     bboxes = []
     for r in rooms:
-        xs = [p[0] for p in r.get("walls", []) if "x1" in p]
-        ys = [p[1] for p in r.get("walls", []) if "y1" in p]
+        xs = [p["x1"] for p in r.get("walls", [])]
+        ys = [p["y1"] for p in r.get("walls", [])]
         if not xs or not ys:
             continue
         bboxes.append((min(xs), min(ys), max(xs), max(ys)))
@@ -542,10 +664,34 @@ def _score_result(rooms: List[Dict[str, Any]], w: int, h: int, px_to_meter: floa
             if median_area > 0 and a < median_area * 0.10:
                 sliver_penalty += 0.4
 
-    coverage_score = 1.0 - abs(coverage - 0.60)
+    rectilinearity_bonus = 0.0
+    for r in rooms:
+        walls = r.get("walls", [])
+        if not walls:
+            continue
+        aligned = 0
+        for wall in walls:
+            dx = abs(wall["x2"] - wall["x1"])
+            dy = abs(wall["y2"] - wall["y1"])
+            if dx < 0.01 or dy < 0.01:
+                aligned += 1
+        if walls:
+            rectilinearity_bonus += (aligned / len(walls)) * 0.1
+
+    size_regularity = 0.0
+    if areas and len(areas) > 1:
+        sorted_areas = sorted(areas)
+        median = sorted_areas[len(sorted_areas) // 2]
+        if median > 0:
+            within_range = sum(1 for a in areas if 0.2 < a / median < 5.0)
+            size_regularity = (within_range / len(areas)) * 0.15
+
+    coverage_score = 1.0 - abs(coverage - 0.55)
     room_count_score = min(len(rooms), 10) / 10.0
 
-    score = coverage_score * 0.50 + room_count_score * 0.25
+    score = coverage_score * 0.45 + room_count_score * 0.20
+    score += rectilinearity_bonus
+    score += size_regularity
     score -= overlap_penalty * 0.4
     score -= sliver_penalty
 
@@ -563,6 +709,23 @@ def _result_is_plausible(rooms: list, orig_w: int, orig_h: int, px_to_meter: flo
     image_area_m2 = (orig_w / px_to_meter) * (orig_h / px_to_meter)
     coverage = total_area_m2 / image_area_m2 if image_area_m2 > 0 else 0
     return 0.15 <= coverage <= 1.05
+
+
+def _try_parameter_set(args: tuple) -> Tuple[float, List[Dict[str, Any]]]:
+    params, prep, w, h, px_to_meter, min_room_area_px = args
+    try:
+        walls = _build_wall_mask_full(
+            prep["gray"], prep["enhanced"], prep["adaptive_thresh"],
+            w, h, params
+        )
+        rooms = _rooms_from_wall_mask(
+            walls, w, h, px_to_meter, min_room_area_px, params["dist_thresh"]
+        )
+        score = _score_result(rooms, w, h, px_to_meter)
+        return score, rooms
+    except Exception as e:
+        logger.debug("Parameter set failed: %s - %s", params, e)
+        return -1.0, []
 
 
 def _segment_rooms(gray: np.ndarray, w: int, h: int,
@@ -584,27 +747,28 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
     best_rooms: List[Dict[str, Any]] = []
     best_score = -1.0
 
-    for params in PARAM_SETS:
-        try:
-            walls = _build_wall_mask_full(
-                prep["gray"], prep["enhanced"], prep["adaptive_thresh"],
-                w, h, params
-            )
-            rooms = _rooms_from_wall_mask(
-                walls, w, h, px_to_meter, min_room_area_px, params["dist_thresh"]
-            )
-            score = _score_result(rooms, w, h, px_to_meter)
-            if score > best_score:
-                best_score = score
-                best_rooms = rooms
-        except Exception as e:
-            logger.debug("Parameter set failed: %s - %s", params, e)
-            continue
+    tasks = [
+        (params, prep, w, h, px_to_meter, min_room_area_px)
+        for params in PARAM_SETS
+    ]
+
+    max_workers = min(len(PARAM_SETS), os.cpu_count() or 4, 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_try_parameter_set, t): i for i, t in enumerate(tasks)}
+        for future in as_completed(futures):
+            try:
+                score, rooms = future.result(timeout=30)
+                if score > best_score:
+                    best_score = score
+                    best_rooms = rooms
+            except Exception as e:
+                logger.debug("Parameter set future failed: %s", e)
 
     if best_score < 0.35:
         logger.info("Low score %.2f, trying CAD double-line fallback", best_score)
         try:
-            edges = cv2.Canny(prep["enhanced"], 20, 80, apertureSize=3)
+            denoised = prep.get("denoised", prep["enhanced"])
+            edges = cv2.Canny(denoised, 20, 80, apertureSize=3)
             min_line_len = max(10, int(math.sqrt(total_px) * 0.015))
             lines = cv2.HoughLinesP(
                 edges, rho=1, theta=np.pi / 180,
@@ -619,6 +783,9 @@ def _segment_rooms(gray: np.ndarray, w: int, h: int,
                     x1, y1, x2, y2 = (int(coords[0]), int(coords[1]),
                                         int(coords[2]), int(coords[3]))
                     dx, dy = x2 - x1, y2 - y1
+                    length = math.hypot(dx, dy)
+                    if length < 5:
+                        continue
                     angle = math.degrees(math.atan2(abs(dy), abs(dx)))
                     if not (angle < 10 or angle > 80):
                         continue
@@ -648,6 +815,15 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
         raise ValueError("Could not decode image bytes")
 
     h, w = img_color.shape[:2]
+
+    if w < MIN_IMAGE_DIMENSION or h < MIN_IMAGE_DIMENSION:
+        raise ValueError(f"Image too small ({w}x{h}). Minimum is {MIN_IMAGE_DIMENSION}x{MIN_IMAGE_DIMENSION}.")
+    if w > MAX_IMAGE_DIMENSION or h > MAX_IMAGE_DIMENSION:
+        scale = MAX_IMAGE_DIMENSION / max(w, h)
+        img_color = cv2.resize(img_color, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        h, w = img_color.shape[:2]
+        logger.info("Resized large image to %dx%d", w, h)
+
     px_to_meter = h / 14.0
 
     gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
@@ -657,12 +833,15 @@ def extract_walls_via_contours(image_bytes: bytes) -> List[Dict[str, Any]]:
     return rooms
 
 
-def build_response(rooms: List[Dict[str, Any]], floors: int) -> dict:
+def build_response(rooms: List[Dict[str, Any]], floors: int,
+                   method: str = "unknown", elapsed: float = 0.0) -> dict:
     return {
         "rooms": rooms,
         "totalRooms": len(rooms),
         "totalFloors": floors,
         "calculatedSqFt": round(sum(r["area"] for r in rooms) * 10.764, 1),
+        "segmentationMethod": method,
+        "processingTimeMs": round(elapsed * 1000, 1),
     }
 
 
@@ -721,6 +900,11 @@ async def process_layout_image(file: UploadFile = File(...), floors: int = Query
         image_bytes = await file.read()
         if len(image_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty file uploaded.")
+        if len(image_bytes) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB."
+            )
 
         t0 = time.time()
         rooms = extract_walls_via_contours(image_bytes)
@@ -745,12 +929,13 @@ async def process_layout_image(file: UploadFile = File(...), floors: int = Query
         elapsed = time.time() - t0
         logger.info("Segmentation completed: method=%s rooms=%d time=%.2fs", method, len(rooms), elapsed)
 
-        response = build_response(rooms, floors)
-        response["segmentationMethod"] = method
+        response = build_response(rooms, floors, method=method, elapsed=elapsed)
         return response
 
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error("Image processing failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
@@ -821,7 +1006,7 @@ async def process_layout_sample(floors: int = Query(1)):
             "area": area_m2,
         })
 
-    return build_response(rooms_out, floors)
+    return build_response(rooms_out, floors, method="sample")
 
 
 @app.post("/api/v1/process-layout/json")
@@ -876,7 +1061,7 @@ async def process_layout_json(payload: List[JSONRoom], floors: int = Query(1)):
             "area": area_m2,
         })
 
-    return build_response(rooms_output, floors)
+    return build_response(rooms_output, floors, method="json")
 
 
 @app.post("/api/v1/process-layout/procedural")
@@ -920,6 +1105,8 @@ async def process_layout_procedural(payload: ProceduralGenerationPayload):
         "totalRooms": len(rooms_output),
         "totalFloors": payload.total_floors,
         "calculatedSqFt": payload.total_sq_ft,
+        "segmentationMethod": "procedural",
+        "processingTimeMs": 0,
     }
 
 
@@ -937,8 +1124,12 @@ async def create_project(payload: SaveLayoutRequest, authorization: str = Header
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    project = save_project(user_id, payload.name, payload.image_url, payload.total_floors)
-    saved_rooms = save_rooms(project["id"], payload.rooms)
+    try:
+        project = save_project(user_id, payload.name, payload.image_url, payload.total_floors)
+        saved_rooms = save_rooms(project["id"], payload.rooms)
+    except Exception as e:
+        logger.error("Failed to save project: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save project.")
 
     return {
         "project": project,

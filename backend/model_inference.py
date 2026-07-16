@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
 import os
 import math
@@ -32,6 +32,7 @@ def _load_model():
             return
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 2
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         _MODEL = ort.InferenceSession(
             model_path, sess_options=sess_opts, providers=["CPUExecutionProvider"]
         )
@@ -123,7 +124,42 @@ def _refine_mask_morphologically(mask: np.ndarray) -> np.ndarray:
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     refined = cv2.morphologyEx(refined, cv2.MORPH_OPEN, open_k, iterations=1)
 
+    blurred = cv2.GaussianBlur(refined, (5, 5), 0)
+    _, refined = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY)
+
     return refined
+
+
+def _bbox_overlap_ratio(b1: Tuple[float, ...], b2: Tuple[float, ...]) -> float:
+    x_overlap = max(0, min(b1[2], b2[2]) - max(b1[0], b2[0]))
+    y_overlap = max(0, min(b1[3], b2[3]) - max(b1[1], b2[1]))
+    inter = x_overlap * y_overlap
+    area1 = max((b1[2] - b1[0]) * (b1[3] - b1[1]), 1e-9)
+    area2 = max((b2[2] - b2[0]) * (b2[3] - b2[1]), 1e-9)
+    return inter / min(area1, area2)
+
+
+def _remove_overlapping_rooms(rooms: List[Dict[str, Any]],
+                               threshold: float = 0.5) -> List[Dict[str, Any]]:
+    if len(rooms) <= 1:
+        return rooms
+
+    rooms_sorted = sorted(rooms, key=lambda r: r["_px_area"], reverse=True)
+    kept: List[Dict[str, Any]] = []
+
+    for room in rooms_sorted:
+        bb = room["_bbox"]
+        dominated = False
+        for kept_room in kept:
+            kept_bb = kept_room["_bbox"]
+            overlap = _bbox_overlap_ratio(bb, kept_bb)
+            if overlap > threshold:
+                dominated = True
+                break
+        if not dominated:
+            kept.append(room)
+
+    return kept
 
 
 def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
@@ -135,9 +171,15 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img_color is None:
+            logger.warning("Failed to decode image for ML segmentation")
             return None
 
         h_orig, w_orig = img_color.shape[:2]
+
+        if w_orig < 64 or h_orig < 64:
+            logger.warning("Image too small for ML segmentation: %dx%d", w_orig, h_orig)
+            return None
+
         img_rgb = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
 
         resized = cv2.resize(img_rgb, (512, 512), interpolation=cv2.INTER_LINEAR)
@@ -157,6 +199,8 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
         px_to_meter = h_orig / 14.0
         num_classes = int(mask_full.max()) + 1
         rooms = []
+        total_image_area = w_orig * h_orig
+
         for cls in range(1, num_classes):
             cls_mask = np.uint8(mask_full == cls) * 255
             if cv2.countNonZero(cls_mask) == 0:
@@ -169,7 +213,7 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
             )
             for cnt in cnts:
                 area_px = cv2.contourArea(cnt)
-                if area_px < (w_orig * h_orig) * 0.004:
+                if area_px < total_image_area * 0.004:
                     continue
 
                 rect = cv2.minAreaRect(cnt)
@@ -184,15 +228,17 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
                     epsilon = 0.02 * cv2.arcLength(cnt, True)
                     approx = cv2.approxPolyDP(cnt, epsilon, True)
                     escalate = 0.02
-                    while len(approx) > 8 and escalate < 0.08:
+                    attempt = 0
+                    while len(approx) > 8 and escalate < 0.08 and attempt < 6:
                         escalate += 0.01
                         approx = cv2.approxPolyDP(cnt, escalate * cv2.arcLength(cnt, True), True)
+                        attempt += 1
                     if len(approx) < 4:
                         continue
                     approx_pts = approx.reshape(-1, 2)
 
-                    perim = cv2.arcLength(cnt, True)
-                    min_edge_len = max(8.0, perim * 0.02)
+                    perimeter = cv2.arcLength(cnt, True)
+                    min_edge_len = max(8.0, perimeter * 0.02)
                     approx_pts = _collapse_short_edges(approx_pts, min_edge_len)
                     if len(approx_pts) < 4:
                         continue
@@ -252,11 +298,15 @@ def segment_rooms_ml(image_bytes: bytes) -> Optional[List[Dict[str, Any]]]:
                     "walls": walls,
                     "area": round(_polygon_area(pts_m), 2),
                     "_px_area": float(area_px),
+                    "_bbox": (min(xs_px), min(ys_px), max(xs_px), max(ys_px)),
                 })
 
+        rooms = _remove_overlapping_rooms(rooms, threshold=0.5)
+
         rooms.sort(key=lambda r: r.get("_px_area", 0), reverse=True)
-        for r in rooms:
+        for i, r in enumerate(rooms):
             r.pop("_px_area", None)
+            r.pop("_bbox", None)
 
         return rooms if rooms else None
 
