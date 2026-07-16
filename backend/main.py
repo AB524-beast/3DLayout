@@ -464,6 +464,28 @@ def _separate_rooms_watershed(rooms_bin: np.ndarray, w: int, h: int,
     return result
 
 
+def _polygon_self_intersects(pts: np.ndarray) -> bool:
+    """Checks whether any two non-adjacent edges of the polygon cross —
+    catches the bowtie/spike artifact that alternating orthogonal
+    snapping can occasionally produce on complex shapes."""
+    def ccw(a, b, c):
+        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+    def segments_intersect(p1, p2, p3, p4):
+        return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
+
+    n = len(pts)
+    for i in range(n):
+        a1, a2 = pts[i], pts[(i + 1) % n]
+        for j in range(i + 1, n):
+            if j == i or (j + 1) % n == i or j == (i + 1) % n:
+                continue  # skip adjacent/shared-vertex edges
+            b1, b2 = pts[j], pts[(j + 1) % n]
+            if segments_intersect(a1, a2, b1, b2):
+                return True
+    return False
+
+
 def _approximate_polygon(contour: np.ndarray, fill_ratio: float,
                          cnt_area: float, perimeter: float) -> Optional[np.ndarray]:
     if fill_ratio > 0.72:
@@ -490,6 +512,17 @@ def _approximate_polygon(contour: np.ndarray, fill_ratio: float,
         return None
 
     snapped = _snap_orthogonal_alternating(approx_pts)
+
+    # Guard: if alternating snap produced a self-intersecting
+    # bowtie/spike, fall back to the simpler per-edge snap
+    # instead — less crisp, but never structurally invalid.
+    if _polygon_self_intersects(snapped):
+        snapped = _snap_orthogonal_strict(approx_pts.astype(np.int32))
+        if _polygon_self_intersects(snapped):
+            # Still broken — use the unsimplified points rather
+            # than ship a self-crossing polygon downstream.
+            snapped = approx_pts.astype(np.int32)
+
     return snapped.reshape(-1, 1, 2)
 
 
