@@ -29,7 +29,7 @@ export default function HomePage() {
   }, [uploadedImageUrl]);
 
   useEffect(() => {
-    if (layoutData && !showEditor) {
+    if (layoutData) {
       setIsFullscreen(true);
       setShowInfo(true);
       if (hideInfoTimer.current) clearTimeout(hideInfoTimer.current);
@@ -38,7 +38,7 @@ export default function HomePage() {
     } else {
       setIsFullscreen(false);
     }
-  }, [layoutData, showEditor]);
+  }, [layoutData]);
 
   const handleGenerationSuccess = (data, file) => {
     setLayoutData(data);
@@ -300,6 +300,21 @@ export default function HomePage() {
     );
   }
 
+  if (isFullscreen && layoutData && showEditor) {
+    return (
+      <div className="fixed inset-0 z-40 bg-black">
+        <div className="absolute inset-0">
+          <RoomCorrectionEditor
+            layoutData={layoutData}
+            imageUrl={uploadedImageUrl}
+            onConfirm={handleCorrectionConfirm}
+            onCancel={handleCorrectionCancel}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-black text-white font-sans relative overflow-hidden">
       <div className="absolute inset-0 pointer-events-none">
@@ -333,7 +348,7 @@ export default function HomePage() {
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
-          <div className="lg:col-span-5 bg-gray-950/60 border border-gray-800/80 rounded-2xl p-5 sm:p-6 backdrop-blur-xl shadow-2xl space-y-5">
+          <div className="lg:col-span-4 bg-gray-950/60 border border-gray-800/80 rounded-2xl p-5 sm:p-6 backdrop-blur-xl shadow-2xl space-y-5">
             <div>
               <h2 className="text-base font-bold text-gray-200">Layout Specifications</h2>
               <p className="text-xs text-gray-500">Upload an image schematic to extract and visualize your layout in 3D.</p>
@@ -357,7 +372,7 @@ export default function HomePage() {
             )}
           </div>
 
-          <div className="lg:col-span-7 flex flex-col h-[50vh] sm:h-[640px] border border-gray-800/60 rounded-2xl overflow-hidden relative shadow-2xl">
+          <div className="lg:col-span-8 flex flex-col h-[60vh] sm:h-[700px] border border-gray-800/60 rounded-2xl overflow-hidden relative shadow-2xl">
             {layoutData ? (
               showEditor ? (
                 <RoomCorrectionEditor
