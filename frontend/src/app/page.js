@@ -309,6 +309,8 @@ export default function HomePage() {
             imageUrl={uploadedImageUrl}
             onConfirm={handleCorrectionConfirm}
             onCancel={handleCorrectionCancel}
+            onSave={handleSave}
+            saving={saving}
           />
         </div>
       </div>
@@ -380,6 +382,8 @@ export default function HomePage() {
                   imageUrl={uploadedImageUrl}
                   onConfirm={handleCorrectionConfirm}
                   onCancel={handleCorrectionCancel}
+                  onSave={handleSave}
+                  saving={saving}
                 />
               ) : (
                 <div className="w-full h-full flex flex-col">

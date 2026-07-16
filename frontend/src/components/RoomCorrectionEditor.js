@@ -152,6 +152,8 @@ export default function RoomCorrectionEditor({
   imageUrl,
   onConfirm,
   onCancel,
+  onSave,
+  saving,
 }) {
   const [imgDims, setImgDims] = useState(null);
   const [selectedRoomId, setSelectedRoomId] = useState(null);
@@ -261,13 +263,13 @@ export default function RoomCorrectionEditor({
     (roomId, vertexIdx) => (e) => {
       e.stopPropagation();
       e.preventDefault();
+      if (roomId !== selectedRoomId) return;
       e.target.setPointerCapture(e.pointerId);
-      setSelectedRoomId(roomId);
       setSelectedVertex({ roomId, vertexIdx });
       dragRef.current = { roomId, vertexIdx, startX: e.clientX, startY: e.clientY };
       setIsDragging(false);
     },
-    []
+    [selectedRoomId]
   );
 
   const handlePointerMove = useCallback(
@@ -316,6 +318,7 @@ export default function RoomCorrectionEditor({
   const handleEdgeDoubleClick = useCallback(
     (roomId, edgeIdx) => (e) => {
       e.stopPropagation();
+      if (roomId !== selectedRoomId) return;
       const { x, y } = svgPoint(e.clientX, e.clientY);
       const newRooms = history.present.map((r) => {
         if (r.id !== roomId) return r;
@@ -325,13 +328,14 @@ export default function RoomCorrectionEditor({
       });
       pushHistory(newRooms);
     },
-    [svgPoint, history.present, pushHistory]
+    [svgPoint, history.present, pushHistory, selectedRoomId]
   );
 
   const handleVertexDelete = useCallback(
     (roomId, vertexIdx) => (e) => {
       e.stopPropagation();
       e.preventDefault();
+      if (roomId !== selectedRoomId) return;
       const newRooms = history.present.map((r) => {
         if (r.id !== roomId || r.vertices.length <= 3) return r;
         return {
@@ -342,7 +346,7 @@ export default function RoomCorrectionEditor({
       pushHistory(newRooms);
       setSelectedVertex(null);
     },
-    [history.present, pushHistory]
+    [history.present, pushHistory, selectedRoomId]
   );
 
   const handleEdgeAddVertex = useCallback(
@@ -371,6 +375,7 @@ export default function RoomCorrectionEditor({
     (roomId, edgeIdx) => (e) => {
       e.stopPropagation();
       e.preventDefault();
+      if (roomId !== selectedRoomId) return;
       const newRooms = history.present.map((r) => {
         if (r.id !== roomId || r.vertices.length <= 3) return r;
         const removeIdx = (edgeIdx + 1) % r.vertices.length;
@@ -382,13 +387,14 @@ export default function RoomCorrectionEditor({
       pushHistory(newRooms);
       setHoveredEdge(null);
     },
-    [history.present, pushHistory]
+    [history.present, pushHistory, selectedRoomId]
   );
 
   const handleVertexContextMenu = useCallback(
     (roomId, vertexIdx) => (e) => {
       e.stopPropagation();
       e.preventDefault();
+      if (roomId !== selectedRoomId) return;
       const newRooms = history.present.map((r) => {
         if (r.id !== roomId || r.vertices.length <= 3) return r;
         return {
@@ -399,7 +405,7 @@ export default function RoomCorrectionEditor({
       pushHistory(newRooms);
       setSelectedVertex(null);
     },
-    [history.present, pushHistory]
+    [history.present, pushHistory, selectedRoomId]
   );
 
   useEffect(() => {
@@ -423,7 +429,7 @@ export default function RoomCorrectionEditor({
       }
 
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedVertex) {
+        if (selectedVertex && selectedRoomId) {
           const { roomId, vertexIdx } = selectedVertex;
           const newRooms = history.present.map((r) => {
             if (r.id !== roomId || r.vertices.length <= 3) return r;
@@ -451,7 +457,7 @@ export default function RoomCorrectionEditor({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedVertex, history.present, pushHistory]);
+  }, [selectedVertex, selectedRoomId, history.present, pushHistory]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -677,6 +683,15 @@ export default function RoomCorrectionEditor({
           >
             Cancel
           </button>
+          {onSave && (
+            <button
+              onClick={onSave}
+              disabled={saving}
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save"}
+            </button>
+          )}
           <button
             onClick={handleConfirm}
             className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all"
@@ -799,10 +814,10 @@ export default function RoomCorrectionEditor({
                             x2={b.x}
                             y2={b.y}
                             stroke="transparent"
-                            strokeWidth={16}
-                            style={{ cursor: "crosshair" }}
-                            onDoubleClick={handleEdgeDoubleClick(room.id, i)}
-                            onContextMenu={handleEdgeDelete(room.id, i)}
+                            strokeWidth={isSelected ? 16 : 0}
+                            style={{ cursor: isSelected ? "crosshair" : "default" }}
+                            onDoubleClick={isSelected ? handleEdgeDoubleClick(room.id, i) : undefined}
+                            onContextMenu={isSelected ? handleEdgeDelete(room.id, i) : undefined}
                             onMouseEnter={() => {
                               if (isSelected) {
                                 setHoveredEdge({ roomId: room.id, edgeIdx: i });
@@ -908,28 +923,31 @@ export default function RoomCorrectionEditor({
                           <circle
                             cx={v.x}
                             cy={v.y}
-                            r={isSel ? 9 : isHov ? 8 : 6}
+                            r={isSelected ? (isSel ? 9 : isHov ? 8 : 6) : 0}
                             fill={isSel ? color : isHov ? color : color}
                             fillOpacity={isSel ? 1 : isHov ? 0.9 : 0.8}
                             stroke={isSel ? "#fbbf24" : isHov ? "#fbbf24" : "white"}
                             strokeWidth={isSel ? 3 : isHov ? 2.5 : 2}
                             style={{
-                              cursor: "grab",
+                              cursor: isSelected ? "grab" : "default",
                               touchAction: "none",
                               filter: isSel ? "url(#glow)" : "none",
+                              pointerEvents: isSelected ? "auto" : "none",
                             }}
                             onPointerDown={handlePointerDown(room.id, vIdx)}
-                            onDoubleClick={handleVertexDelete(room.id, vIdx)}
-                            onContextMenu={handleVertexContextMenu(room.id, vIdx)}
+                            onDoubleClick={isSelected ? handleVertexDelete(room.id, vIdx) : undefined}
+                            onContextMenu={isSelected ? handleVertexContextMenu(room.id, vIdx) : undefined}
                             onMouseEnter={() => {
-                              setHoveredVertex({ roomId: room.id, vertexIdx: vIdx });
-                              const meterX = ((v.x - imgDims.w / 2) / pxToMeter).toFixed(2);
-                              const meterY = ((v.y - imgDims.h / 2) / pxToMeter).toFixed(2);
-                              setTooltip({
-                                x: v.x + 14,
-                                y: v.y - 14,
-                                text: `(${meterX}, ${meterY})`,
-                              });
+                              if (isSelected) {
+                                setHoveredVertex({ roomId: room.id, vertexIdx: vIdx });
+                                const meterX = ((v.x - imgDims.w / 2) / pxToMeter).toFixed(2);
+                                const meterY = ((v.y - imgDims.h / 2) / pxToMeter).toFixed(2);
+                                setTooltip({
+                                  x: v.x + 14,
+                                  y: v.y - 14,
+                                  text: `(${meterX}, ${meterY})`,
+                                });
+                              }
                             }}
                             onMouseLeave={() => {
                               setHoveredVertex(null);
@@ -1058,6 +1076,13 @@ export default function RoomCorrectionEditor({
               <div><span className="text-gray-400">G</span> Grid snap</div>
               <div><span className="text-gray-400">D</span> Dimensions</div>
               <div><span className="text-gray-400">Del</span> Remove vertex</div>
+            </div>
+          )}
+
+          {/* Room selection hint */}
+          {!selectedRoomId && imgDims && rooms.length > 0 && (
+            <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-20 bg-amber-600/90 backdrop-blur-sm border border-amber-500/50 rounded-xl px-4 py-2 text-xs text-white font-semibold shadow-xl animate-pulse">
+              Select a room to start editing
             </div>
           )}
         </div>
