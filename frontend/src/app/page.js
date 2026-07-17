@@ -132,9 +132,9 @@ export default function HomePage() {
 
   if (isFullscreen && layoutData && !showEditor) {
     return (
-      <div className="fixed inset-0 z-40 bg-black">
-        <div className="absolute inset-0">
-          <RoomExtrusionCanvas
+    <div className="fixed inset-0 z-[60] bg-black">
+      <div className="absolute inset-0">
+        <RoomExtrusionCanvas
             layoutData={layoutData}
             activeFloor={activeFloor}
             imageUrl={uploadedImageUrl}
@@ -309,9 +309,9 @@ export default function HomePage() {
 
   if (isFullscreen && layoutData && showEditor) {
     return (
-      <div className="fixed inset-0 z-40 bg-black">
-        <div className="absolute inset-0">
-          <RoomCorrectionEditor
+    <div className="fixed inset-0 z-[60] bg-black">
+      <div className="absolute inset-0">
+        <RoomCorrectionEditor
             layoutData={layoutData}
             imageUrl={uploadedImageUrl}
             onConfirm={handleCorrectionConfirm}
