@@ -174,6 +174,7 @@ export default function RoomCorrectionEditor({
   const svgRef = useRef(null);
   const containerRef = useRef(null);
   const dragRef = useRef(null);
+  const dragModeRef = useRef(null);
   const panStartRef = useRef(null);
   const lastAddRef = useRef(0);
 
@@ -267,33 +268,114 @@ export default function RoomCorrectionEditor({
       e.target.setPointerCapture(e.pointerId);
       setSelectedVertex({ roomId, vertexIdx });
       dragRef.current = { roomId, vertexIdx, startX: e.clientX, startY: e.clientY };
+      dragModeRef.current = "vertex";
       setIsDragging(false);
     },
     [selectedRoomId]
   );
 
+  const handleRoomFillPointerDown = useCallback(
+    (roomId) => (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      setSelectedRoomId(roomId);
+      setSelectedVertex(null);
+      setHoveredEdge(null);
+      const room = rooms.find((r) => r.id === roomId);
+      if (!room) return;
+      e.target.setPointerCapture(e.pointerId);
+      const startMouse = svgPointRaw(e.clientX, e.clientY);
+      dragRef.current = {
+        roomId,
+        startMouse,
+        startVertices: room.vertices.map((v) => ({ ...v })),
+      };
+      dragModeRef.current = "room";
+      setIsDragging(false);
+    },
+    [rooms, svgPointRaw]
+  );
+
+  const handleAllRoomsPointerDown = useCallback(
+    (e) => {
+      if (!e.shiftKey) {
+        setSelectedRoomId(null);
+        setSelectedVertex(null);
+        setHoveredEdge(null);
+        return;
+      }
+      e.preventDefault();
+      const startMouse = svgPointRaw(e.clientX, e.clientY);
+      dragRef.current = {
+        startMouse,
+        startRooms: rooms.map((r) => ({
+          id: r.id,
+          vertices: r.vertices.map((v) => ({ ...v })),
+        })),
+      };
+      dragModeRef.current = "all";
+      setIsDragging(false);
+    },
+    [rooms, svgPointRaw]
+  );
+
   const handlePointerMove = useCallback(
     (e) => {
       const drag = dragRef.current;
-      if (!drag) return;
+      const mode = dragModeRef.current;
+      if (!drag || !mode) return;
 
-      const dx = e.clientX - drag.startX;
-      const dy = e.clientY - drag.startY;
-      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-        setIsDragging(true);
+      if (mode === "vertex") {
+        const dx = e.clientX - drag.startX;
+        const dy = e.clientY - drag.startY;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+          setIsDragging(true);
+        }
+        const { x, y } = svgPoint(e.clientX, e.clientY);
+        const newRooms = history.present.map((r) => {
+          if (r.id !== drag.roomId) return r;
+          const newVertices = r.vertices.map((v, idx) =>
+            idx === drag.vertexIdx ? { x, y } : v
+          );
+          return { ...r, vertices: newVertices };
+        });
+        dispatch({ type: "SET", rooms: newRooms });
+      } else if (mode === "room") {
+        const currentMouse = svgPointRaw(e.clientX, e.clientY);
+        const dx = currentMouse.x - drag.startMouse.x;
+        const dy = currentMouse.y - drag.startMouse.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+          setIsDragging(true);
+        }
+        const newRooms = history.present.map((r) => {
+          if (r.id !== drag.roomId) return r;
+          const newVertices = drag.startVertices.map((v) => ({
+            x: v.x + dx,
+            y: v.y + dy,
+          }));
+          return { ...r, vertices: newVertices };
+        });
+        dispatch({ type: "SET", rooms: newRooms });
+      } else if (mode === "all") {
+        const currentMouse = svgPointRaw(e.clientX, e.clientY);
+        const dx = currentMouse.x - drag.startMouse.x;
+        const dy = currentMouse.y - drag.startMouse.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+          setIsDragging(true);
+        }
+        const newRooms = history.present.map((r) => {
+          const saved = drag.startRooms.find((sr) => sr.id === r.id);
+          if (!saved) return r;
+          const newVertices = saved.vertices.map((v) => ({
+            x: v.x + dx,
+            y: v.y + dy,
+          }));
+          return { ...r, vertices: newVertices };
+        });
+        dispatch({ type: "SET", rooms: newRooms });
       }
-
-      const { x, y } = svgPoint(e.clientX, e.clientY);
-      const newRooms = history.present.map((r) => {
-        if (r.id !== drag.roomId) return r;
-        const newVertices = r.vertices.map((v, idx) =>
-          idx === drag.vertexIdx ? { x, y } : v
-        );
-        return { ...r, vertices: newVertices };
-      });
-      dispatch({ type: "SET", rooms: newRooms });
     },
-    [svgPoint, history.present]
+    [svgPoint, svgPointRaw, history.present]
   );
 
   const handlePointerUp = useCallback(() => {
@@ -301,6 +383,7 @@ export default function RoomCorrectionEditor({
       pushHistory(history.present);
     }
     dragRef.current = null;
+    dragModeRef.current = null;
     setIsDragging(false);
   }, [history.present, isDragging, pushHistory]);
 
@@ -447,6 +530,9 @@ export default function RoomCorrectionEditor({
         setHoveredEdge(null);
         setSelectedRoomId(null);
         setActiveTool("select");
+        dragRef.current = null;
+        dragModeRef.current = null;
+        setIsDragging(false);
       }
       if (e.key === "g" && !e.ctrlKey && !e.metaKey) {
         setGridSnap((prev) => !prev);
@@ -754,6 +840,7 @@ export default function RoomCorrectionEditor({
                 transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                 transformOrigin: "center center",
               }}
+              onPointerDown={handleAllRoomsPointerDown}
             >
               <defs>
                 <filter id="glow">
@@ -790,13 +877,14 @@ export default function RoomCorrectionEditor({
 
                 return (
                   <g key={room.id}>
-                    {/* Room fill */}
+                    {/* Room fill — draggable */}
                     <path
                       d={pathD}
                       fill={color}
                       fillOpacity={isSelected ? 0.2 : 0.08}
                       stroke="none"
-                      style={{ pointerEvents: "none" }}
+                      style={{ cursor: "grab", touchAction: "none" }}
+                      onPointerDown={handleRoomFillPointerDown(room.id)}
                     />
 
                     {/* Edges */}
@@ -821,6 +909,7 @@ export default function RoomCorrectionEditor({
                             stroke="transparent"
                             strokeWidth={isSelected ? 16 : 0}
                             style={{ cursor: isSelected ? "crosshair" : "default" }}
+                            onPointerDown={(e) => e.stopPropagation()}
                             onDoubleClick={isSelected ? handleEdgeDoubleClick(room.id, i) : undefined}
                             onContextMenu={isSelected ? handleEdgeDelete(room.id, i) : undefined}
                             onMouseEnter={() => {
@@ -858,6 +947,7 @@ export default function RoomCorrectionEditor({
                           {isSelected && (
                             <g
                               style={{ cursor: "pointer" }}
+                              onPointerDown={(e) => e.stopPropagation()}
                               onClick={handleEdgeAddVertex(room.id, i)}
                               onContextMenu={handleEdgeDelete(room.id, i)}
                             >
@@ -1077,6 +1167,8 @@ export default function RoomCorrectionEditor({
             <div className="absolute top-3 right-3 z-20 bg-gray-900/90 border border-gray-800/60 rounded-lg px-2.5 py-1.5 text-[9px] text-gray-500 space-y-0.5 font-mono">
               <div><span className="text-gray-400">Scroll</span> Zoom</div>
               <div><span className="text-gray-400">Middle-drag</span> Pan</div>
+              <div><span className="text-gray-400">Drag room</span> Move room</div>
+              <div><span className="text-gray-400">Shift+drag</span> Move all</div>
               <div><span className="text-gray-400">Ctrl+Z</span> Undo</div>
               <div><span className="text-gray-400">G</span> Grid snap</div>
               <div><span className="text-gray-400">D</span> Dimensions</div>
@@ -1087,7 +1179,7 @@ export default function RoomCorrectionEditor({
           {/* Room selection hint */}
           {!selectedRoomId && imgDims && rooms.length > 0 && (
             <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-20 bg-amber-600/90 backdrop-blur-sm border border-amber-500/50 rounded-xl px-4 py-2 text-xs text-white font-semibold shadow-xl animate-pulse">
-              Select a room to start editing
+              Click a room to edit vertices, drag to move it. Shift+drag empty space to move all.
             </div>
           )}
         </div>
