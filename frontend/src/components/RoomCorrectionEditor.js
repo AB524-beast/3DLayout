@@ -598,17 +598,17 @@ export default function RoomCorrectionEditor({
         <div className="flex items-center gap-3">
           <button
             onClick={onCancel}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800/60 hover:bg-gray-700/60 text-gray-400 hover:text-white text-[10px] font-bold uppercase rounded-lg transition-all"
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/40 text-amber-400 border border-amber-600/40 text-[10px] font-bold uppercase rounded-lg transition-all"
             title="Back to 3D View"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M19 12H5M12 19l-7-7 7-7" />
             </svg>
-            <span className="hidden sm:inline">Back</span>
+            Back
           </button>
-          <div className="h-4 w-px bg-gray-700" />
-          <h2 className="text-sm font-bold text-gray-200">Layout Editor</h2>
-          <div className="h-4 w-px bg-gray-700" />
+          <div className="h-4 w-px bg-gray-700 shrink-0" />
+          <h2 className="text-sm font-bold text-gray-200 shrink-0">Layout Editor</h2>
+          <div className="h-4 w-px bg-gray-700 shrink-0" />
 
           <div className="flex items-center gap-1">
             <button
@@ -687,12 +687,6 @@ export default function RoomCorrectionEditor({
             className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all"
           >
             + Room
-          </button>
-          <button
-            onClick={onCancel}
-            className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-bold uppercase rounded-lg transition-all"
-          >
-            Cancel
           </button>
           {onSaveAndGoBack && (
             <button
