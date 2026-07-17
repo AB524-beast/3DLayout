@@ -596,6 +596,17 @@ export default function RoomCorrectionEditor({
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-800/60 bg-gray-900/80 backdrop-blur-sm">
         <div className="flex items-center gap-3">
+          <button
+            onClick={onCancel}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800/60 hover:bg-gray-700/60 text-gray-400 hover:text-white text-[10px] font-bold uppercase rounded-lg transition-all"
+            title="Back to 3D View"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+            <span className="hidden sm:inline">Back</span>
+          </button>
+          <div className="h-4 w-px bg-gray-700" />
           <h2 className="text-sm font-bold text-gray-200">Layout Editor</h2>
           <div className="h-4 w-px bg-gray-700" />
 
