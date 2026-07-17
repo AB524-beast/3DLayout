@@ -692,6 +692,19 @@ export default function RoomCorrectionEditor({
             </svg>
             Back
           </button>
+          <button
+            onClick={onSaveAndGoBack}
+            disabled={saving}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-50"
+            title="Save and return to 3D View"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+              <polyline points="17 21 17 13 7 13 7 21" />
+              <polyline points="7 3 7 8 15 8" />
+            </svg>
+            {saving ? "Saving..." : "Save"}
+          </button>
           <div className="h-4 w-px bg-gray-700 shrink-0" />
           <h2 className="text-sm font-bold text-gray-200 shrink-0">Layout Editor</h2>
           <div className="h-4 w-px bg-gray-700 shrink-0" />
@@ -774,15 +787,6 @@ export default function RoomCorrectionEditor({
           >
             + Room
           </button>
-          {onSaveAndGoBack && (
-            <button
-              onClick={onSaveAndGoBack}
-              disabled={saving}
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all disabled:opacity-50"
-            >
-              {saving ? "Saving..." : "Save & Return"}
-            </button>
-          )}
           <button
             onClick={handleConfirm}
             className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-[10px] font-bold uppercase rounded-lg transition-all"
