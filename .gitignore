@@ -1,15 +1,25 @@
-# Ignore YOLO training runs and weights
+# ── Environment & secrets ──
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# ── YOLO training runs and weights ──
 runs/
 *.pt
 
-# Ignore raw datasets
+# ── ML model binaries (too large for git) ──
+backend/models/*.onnx
+backend/models/*.onnx.data
+
+# ── Raw datasets ──
 Segmenting-a-Floor-Plan-1/
 absolute/path/to/any/other/dataset/
 
-# Optional: Ignore local JSON outputs if they get massive
+# ── Optional: Ignore local JSON outputs if they get massive ──
 # blueprint_rooms.json
 
-# Ignore Python virtual environments
+# ── Python virtual environments ──
 backend/venv/
 venv/
 .venv/
@@ -17,5 +27,15 @@ env/
 __pycache__/
 *.pyc
 
-# User uploaded images
+# ── Node ──
+node_modules/
+.next/
+frontend/.next/
+frontend/node_modules/
+
+# ── User uploaded images ──
 backend/user_uploads/
+
+# ── OS files ──
+.DS_Store
+Thumbs.db

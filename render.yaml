@@ -5,10 +5,25 @@ services:
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    healthCheckPath: /health
     envVars:
       - key: ENVIRONMENT
         value: production
+      - key: PYTHON_VERSION
+        value: "3.11"
       - key: PORT
         value: 8000
       - key: CORS_ORIGINS
-        value: "*"
+        sync: false
+        value: "*"  # Set to your Vercel frontend URL in Render dashboard, e.g. https://your-app.vercel.app
+      - key: SUPABASE_URL
+        sync: false
+        value: "https://kkhlqwyhrlinmojpizyg.supabase.co"
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+        value: ""  # Set your Supabase service role key in Render dashboard
+      - key: OTEL_SERVICE_NAME
+        value: 3d-layout-backend
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+        value: ""  # Optional: set if using an OTLP collector

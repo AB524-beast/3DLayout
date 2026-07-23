@@ -1,4 +1,6 @@
 import uvicorn
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -17,6 +19,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tracing import setup_tracing
 from database import save_project, save_rooms
 from model_inference import segment_rooms_ml, is_model_available
+from yolo_inference import (
+    is_yolo_available, detect_objects, decode_image_to_cv2,
+    build_wall_mask_from_yolo, segment_rooms_from_yolo_walls,
+    get_yolo_room_labels,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +59,8 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_available": is_model_available()}
+    return {"status": "ok", "model_available": is_model_available(),
+            "yolo_available": is_yolo_available()}
 
 
 # ---------------------------------------------------------------------------
@@ -628,9 +636,6 @@ def _rdp_simplify(pts, eps_px=3.0):
 
 @app.post("/api/v1/process-layout/image")
 async def process_layout_image(file: UploadFile = File(...), floors: int = Query(1)):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Invalid format. Expected an image file.")
-
     try:
         image_bytes = await file.read()
         if len(image_bytes) == 0:
@@ -642,29 +647,70 @@ async def process_layout_image(file: UploadFile = File(...), floors: int = Query
             )
 
         t0 = time.time()
-        rooms = extract_walls_via_contours(image_bytes)
-        method = "opencv"
 
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img_check = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        classical_ok = False
-        if img_check is not None:
-            h_c, w_c = img_check.shape[:2]
-            px_to_meter_c = h_c / 14.0
-            classical_ok = _result_is_plausible(rooms, w_c, h_c, px_to_meter_c)
+        img_color = decode_image_to_cv2(image_bytes)
+        h_orig, w_orig = img_color.shape[:2]
 
-        if not classical_ok:
-            logger.info("Classical result implausible, trying ML model")
+        if w_orig < MIN_IMAGE_DIMENSION or h_orig < MIN_IMAGE_DIMENSION:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Image too small ({w_orig}x{h_orig}). Minimum is {MIN_IMAGE_DIMENSION}x{MIN_IMAGE_DIMENSION}.",
+            )
+        if w_orig > MAX_IMAGE_DIMENSION or h_orig > MAX_IMAGE_DIMENSION:
+            scale = MAX_IMAGE_DIMENSION / max(w_orig, h_orig)
+            img_color = cv2.resize(img_color, None, fx=scale, fy=scale,
+                                   interpolation=cv2.INTER_AREA)
+            h_orig, w_orig = img_color.shape[:2]
+            logger.info("Resized large image to %dx%d", w_orig, h_orig)
+
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+        px_to_meter = h_orig / 14.0
+        rooms = []
+        method = "none"
+
+        # ── PRIMARY: YOLO object detection → wall mask → room segmentation ──
+        yolo_detections = detect_objects(image_bytes)
+        if yolo_detections:
+            logger.info("YOLO detected %d objects", len(yolo_detections))
+            yolo_walls = build_wall_mask_from_yolo(gray, yolo_detections, w_orig, h_orig)
+            if yolo_walls is not None:
+                yolo_rooms = segment_rooms_from_yolo_walls(
+                    yolo_walls, gray, w_orig, h_orig, px_to_meter,
+                )
+                if yolo_rooms and _result_is_plausible(yolo_rooms, w_orig, h_orig, px_to_meter):
+                    rooms = yolo_rooms
+                    method = "yolo"
+
+        # ── FALLBACK 1: Classical OpenCV edge-based segmentation ──
+        if not rooms:
+            logger.info("YOLO pipeline produced no rooms, falling back to OpenCV")
+            rooms = _segment_rooms(gray, w_orig, h_orig, px_to_meter)
+            if rooms:
+                method = "opencv"
+
+        # ── FALLBACK 2: ML ONNX room segmenter ──
+        if not rooms or not _result_is_plausible(rooms, w_orig, h_orig, px_to_meter):
+            logger.info("Trying ML ONNX segmenter")
             ml_rooms = segment_rooms_ml(image_bytes)
-            if ml_rooms and img_check is not None:
-                if _result_is_plausible(ml_rooms, w_c, h_c, px_to_meter_c):
-                    rooms = ml_rooms
-                    method = "ml"
+            if ml_rooms and _result_is_plausible(ml_rooms, w_orig, h_orig, px_to_meter):
+                rooms = ml_rooms
+                method = "ml"
+
+        # ── Enrich rooms with YOLO-detected objects (doors, windows, etc.) ──
+        if yolo_detections and rooms:
+            rooms = get_yolo_room_labels(yolo_detections, rooms, w_orig, h_orig)
 
         elapsed = time.time() - t0
-        logger.info("Segmentation completed: method=%s rooms=%d time=%.2fs", method, len(rooms), elapsed)
+        logger.info("Segmentation completed: method=%s rooms=%d time=%.2fs",
+                     method, len(rooms), elapsed)
 
         response = build_response(rooms, floors, method=method, elapsed=elapsed)
+        if yolo_detections:
+            response["yoloObjects"] = [
+                {"class": d["class"], "confidence": round(d["confidence"], 3),
+                 "bbox": d["bbox"]}
+                for d in yolo_detections
+            ]
         return response
 
     except HTTPException:

@@ -29,22 +29,18 @@ export default function HomePage() {
   }, [uploadedImageUrl]);
 
   useEffect(() => {
-    if (layoutData) {
-      setIsFullscreen(true);
-      setShowInfo(true);
-      if (hideInfoTimer.current) clearTimeout(hideInfoTimer.current);
-      hideInfoTimer.current = setTimeout(() => setShowInfo(false), 5000);
-      return () => { if (hideInfoTimer.current) clearTimeout(hideInfoTimer.current); };
-    } else {
-      setIsFullscreen(false);
-    }
-  }, [layoutData]);
+    return () => { if (hideInfoTimer.current) clearTimeout(hideInfoTimer.current); };
+  }, []);
 
   const handleGenerationSuccess = (data, file) => {
     setLayoutData(data);
     setSavedMsg(null);
     setActiveFloor(0);
     setLocalFile(file || null);
+    setIsFullscreen(true);
+    setShowInfo(true);
+    if (hideInfoTimer.current) clearTimeout(hideInfoTimer.current);
+    hideInfoTimer.current = setTimeout(() => setShowInfo(false), 5000);
 
     setUploadedImageUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
@@ -109,6 +105,10 @@ export default function HomePage() {
   const handleCorrectionConfirm = useCallback((correctedData) => {
     setLayoutData(correctedData);
     setShowEditor(false);
+    setIsFullscreen(true);
+    setShowInfo(true);
+    if (hideInfoTimer.current) clearTimeout(hideInfoTimer.current);
+    hideInfoTimer.current = setTimeout(() => setShowInfo(false), 5000);
   }, []);
 
   const handleSaveAndGoBack = useCallback(async () => {

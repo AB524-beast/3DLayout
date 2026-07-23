@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import Link from "next/link";
 import { AuthProvider } from "../context/AuthContext";
 import NavBar from "../components/NavBar";
 import DockNav from "../components/Dock/DockNav";
